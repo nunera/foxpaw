@@ -1,0 +1,24 @@
+{
+  "name": "zen-bidi-relay",
+  "version": "0.1.0",
+  "description": "Control a real Zen or Firefox profile over WebDriver BiDi, with a shared session broker and an oh-my-pi tool.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nunera/zen-bidi-relay.git"
+  },
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "bunx tsc --noEmit",
+    "test": "bun test",
+    "start": "bun run src/cli.ts",
+    "broker": "bun run src/broker.ts",
+    "install-extension": "ln -sfn \"$PWD/extension/zen-browser.ts\" \"$HOME/.omp/agent/extensions/zen-browser.ts\""
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.9.3",
+    "zod": "^4.6.4"
+  }
+}
