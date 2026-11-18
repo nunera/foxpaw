@@ -28,7 +28,7 @@ test('registers the significant page-change wait action', async () => {
     expect(() => registered.parameters.parse({ action: removed, tabId: 'tab_1' })).toThrow();
   }
   expect(registered.parameters.parse({ action: 'dialog', tabId: 'tab_1', dialogAction: 'accept' })).toMatchObject({ dialogAction: 'accept' });
-  expect(registered.parameters.parse({ action: 'check', tabId: 'tab_1', selector: 'input[type=checkbox]', role: 'checkbox', name: 'CSCE 312-501', checked: true })).toMatchObject({ selector: 'input[type=checkbox]', role: 'checkbox', name: 'CSCE 312-501' });
+  expect(registered.parameters.parse({ action: 'check', tabId: 'tab_1', selector: 'input[type=checkbox]', role: 'checkbox', name: 'Section 001', checked: true })).toMatchObject({ selector: 'input[type=checkbox]', role: 'checkbox', name: 'Section 001' });
   expect(registered.description).toContain('call `tabs` first');
   expect(registered.description).toContain('openPrompt');
 });

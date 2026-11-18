@@ -1,11 +1,11 @@
 {
-  "name": "zen-bidi-relay",
+  "name": "foxpaw",
   "version": "0.1.0",
-  "description": "Control a real Zen or Firefox profile over WebDriver BiDi, with a shared session broker and an oh-my-pi tool.",
+  "description": "An oh-my-pi tool that lets an AI agent use the Zen or Firefox you already have open, signed in, over WebDriver BiDi.",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/nunera/zen-bidi-relay.git"
+    "url": "git+https://github.com/nunera/foxpaw.git"
   },
   "private": true,
   "type": "module",

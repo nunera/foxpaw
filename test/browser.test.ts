@@ -61,15 +61,15 @@ test('rechecks the URL after starting lifecycle subscriptions', async () => {
 });
 
 test('URL waits ignore the query string and require the matching document to have loaded', async () => {
-  let state = { href: 'https://sso.example/login?service=https%3A%2F%2Fhowdy.tamu.edu%2F', loaded: true };
+  let state = { href: 'https://sso.example/login?service=https%3A%2F%2Fportal.example.edu%2F', loaded: true };
   const browser = new ZenBrowser(fakeBidi((method) => method === 'script.evaluate' ? evaluated(state) : {}));
-  await expect(browser.waitForUrl('ctx', 'howdy.tamu.edu', 150)).rejects.toThrow('Timed out');
+  await expect(browser.waitForUrl('ctx', 'portal.example.edu', 150)).rejects.toThrow('Timed out');
   await expect(browser.waitForUrl('ctx', 'service=https', 150)).rejects.toThrow('Timed out');
   await expect(browser.waitForUrl('ctx', '?service=https', 150)).resolves.toBeUndefined();
-  state = { href: 'https://howdy.tamu.edu/home#done', loaded: false };
-  await expect(browser.waitForUrl('ctx', 'howdy.tamu.edu', 150)).rejects.toThrow('Timed out');
+  state = { href: 'https://portal.example.edu/home#done', loaded: false };
+  await expect(browser.waitForUrl('ctx', 'portal.example.edu', 150)).rejects.toThrow('Timed out');
   state = { ...state, loaded: true };
-  await expect(browser.waitForUrl('ctx', 'howdy.tamu.edu/home#done', 150)).resolves.toBeUndefined();
+  await expect(browser.waitForUrl('ctx', 'portal.example.edu/home#done', 150)).resolves.toBeUndefined();
 });
 
 test('URL waits complete on domContentLoaded for the URL, never on navigationStarted', async () => {
@@ -103,10 +103,10 @@ test('tracks open dialogs, skips page evaluation for them, and clears them once 
   await browser.watchPrompts();
 
   const watcher = browser.promptOpened('a');
-  bidi.emit({ method: 'browsingContext.userPromptOpened', params: { context: 'a', type: 'confirm', message: 'Drop CSCE 312?', handler: 'ignore' } });
-  await expect(watcher.opened).resolves.toEqual({ type: 'confirm', message: 'Drop CSCE 312?' });
+  bidi.emit({ method: 'browsingContext.userPromptOpened', params: { context: 'a', type: 'confirm', message: 'Drop this section?', handler: 'ignore' } });
+  await expect(watcher.opened).resolves.toEqual({ type: 'confirm', message: 'Drop this section?' });
   watcher.stop();
-  expect(browser.openPrompt('a')).toEqual({ type: 'confirm', message: 'Drop CSCE 312?' });
+  expect(browser.openPrompt('a')).toEqual({ type: 'confirm', message: 'Drop this section?' });
 
   const contexts = await browser.contexts();
   expect(evaluatedContexts).toEqual(['b']);
