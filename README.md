@@ -18,8 +18,9 @@ Firefox's Remote Agent has no authentication and no encryption. While it's on, a
 What this project does about it:
 
 - The direct client and the broker client both refuse non-loopback endpoints, and the broker binds only to `127.0.0.1`.
-- Diagnostics, traces, and event buffers drop cookie values, auth headers, token/password/secret query parameters, request and response bodies, typed text, prompt text, and file paths.
-- Operations that change browser state (cookie import/export, emulation, permissions, request routing) only run in isolated test tabs, never against your normal profile.
+- Failure diagnostics and event buffers drop cookie values, auth headers, token/password/secret query parameters, request and response bodies, typed text, prompt text, and file paths.
+- The BiDi session leaves page dialogs (`alert`, `confirm`, `prompt`, "Leave site?") alone instead of letting Firefox auto-close them in your tabs.
+- Checking for optional browser features only reads state (`browser.getUserContexts`); it never creates containers or changes settings. Disposable test containers from `open({ isolation: "test" })` are removed when their last tab closes or the omp session ends.
 
 It can't stop other local software from connecting to port 9222. Don't add `--remote-allow-hosts`, `--remote-allow-origins`, or `--remote-allow-system-access`, and restart the browser normally when you're done. Mozilla covers the details in [Security aspects of the Remote Agent](https://firefox-source-docs.mozilla.org/remote/Security.html).
 
@@ -61,7 +62,7 @@ bun run start -- open https://example.com
 bun run start -- navigate example.com https://duckduckgo.com
 bun run start -- fill duckduckgo.com 'input[name=q]' 'webdriver bidi'
 bun run start -- press duckduckgo.com Enter 'input[name=q]'
-bun run start -- wait-url duckduckgo.com 'q='
+bun run start -- wait-url duckduckgo.com '?q='
 bun run start -- screenshot duckduckgo.com ./results.png
 bun run start -- evaluate duckduckgo.com 'document.title'
 ```
@@ -80,17 +81,19 @@ bun run install-extension
 
 This symlinks `extension/zen-browser.ts` into `~/.omp/agent/extensions/`. omp loads extensions when a session starts, so open a new session after installing or editing it.
 
-The first tool call starts the broker on `ws://127.0.0.1:9223` in the background. It owns the BiDi session, runs requests one at a time, and forwards events to every connected omp session. When the last one disconnects, the broker ends the session and exits.
+The first tool call starts the broker on `ws://127.0.0.1:9223` in the background. It owns the BiDi session, forwards requests from every connected omp session, and forwards events back to them. When the last one disconnects, the broker ends the session and exits.
 
 The tool is meant to be used in this order:
 
-1. `tabs` lists tabs with a `tabId`. A `tabId` stays valid across navigation for the life of the omp session.
+1. `tabs` lists tabs with a `tabId`. A `tabId` stays valid across navigation for the life of the omp session. Pass it on every call: actions that can change a page refuse to run without `tabId` (or a `target` matching one tab) rather than acting on whichever tab has focus.
 2. `inspect` returns element handles (`el_*`). A handle belongs to one document. After a navigation or re-render it fails with `stale element handle` rather than acting on whatever replaced it, so call `inspect` again.
-3. Act on an element by handle, CSS `selector`, or `role` plus `name`.
+3. Act on an element by handle, or by CSS `selector`, `role`, and `name`, which narrow one element together.
 
 Pointer actions resolve their target again right before sending input and confirm it's the same element. If the page swapped it in between, you get `actionPerformed: false` and no pointer events are sent.
 
-`open({ isolation: "test" })` puts the tab in a throwaway Firefox user context. Anything that changes browser state requires one of these tabs. If your browser build is missing an optional BiDi module, the tool returns `Feature unavailable in this Zen/Firefox build: <feature>` and doesn't fall back to page scripts.
+If an action opens a page dialog, the response says so in `openPrompt`, and the agent answers it with the `dialog` action. `fill`, `type`, `select`, and `check` read the control back; when that fails after the input was sent, the response says `actionPerformed: true, verified: false` so the agent doesn't send it twice.
+
+`open({ isolation: "test" })` puts the tab in a throwaway Firefox user context with its own cookies. If your browser build lacks user contexts, that returns `Feature unavailable in this Zen/Firefox build: browserUserContexts`.
 
 Every action is documented in [docs/zen-browser-tool.md](docs/zen-browser-tool.md).
 

@@ -14,8 +14,9 @@ test('rejects HTTP endpoints', () => {
   expect(() => new BidiClient('http://127.0.0.1:9222/session')).toThrow('requires a WebSocket URL');
 });
 
-test('opens one BiDi session, routes commands, and ends the session', async () => {
+test('opens one BiDi session for concurrent first callers, ignores prompts, routes commands, and ends the session', async () => {
   const methods: string[] = [];
+  let sessionParams: unknown;
   const server = Bun.serve<{ opened: boolean }>({
     port: 0,
     fetch(request, webServer) {
@@ -26,6 +27,7 @@ test('opens one BiDi session, routes commands, and ends the session', async () =
       message(socket, raw) {
         const request = JSON.parse(String(raw)) as { id: number; method: string; params: unknown };
         methods.push(request.method);
+        if (request.method === 'session.new') sessionParams = request.params;
         const result = request.method === 'session.new' ? { sessionId: 'session-1', capabilities: { browserName: 'zen' } } : { echoed: request.params };
         socket.send(JSON.stringify({ id: request.id, result }));
       },
@@ -34,14 +36,16 @@ test('opens one BiDi session, routes commands, and ends the session', async () =
   const client = new BidiClient(`ws://127.0.0.1:${server.port}/session`);
 
   try {
-    await expect(client.command('session.status', { ready: true })).resolves.toEqual({ echoed: { ready: true } });
+    await expect(Promise.all([client.command('session.status', { ready: true }), client.command('session.status', { ready: false })]))
+      .resolves.toEqual([{ echoed: { ready: true } }, { echoed: { ready: false } }]);
     await expect(client.sessionInfo()).resolves.toEqual({ sessionId: 'session-1', capabilities: { browserName: 'zen' } });
   } finally {
     await client.close();
     server.stop(true);
   }
 
-  expect(methods).toEqual(['session.new', 'session.status', 'session.end']);
+  expect(methods).toEqual(['session.new', 'session.status', 'session.status', 'session.end']);
+  expect(sessionParams).toEqual({ capabilities: { alwaysMatch: { unhandledPromptBehavior: { default: 'ignore' } }, firstMatch: [{}] } });
 });
 
 

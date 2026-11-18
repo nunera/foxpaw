@@ -66,7 +66,7 @@ test.skipIf(!runIntegration)('drives semantic, frame, lifecycle, stale-node, and
   }
 }, 30_000);
 
-test.skipIf(!runIntegration)('probes and exercises supported isolated-context controls', async () => {
+test.skipIf(!runIntegration)('probes user contexts read-only and opens an isolated tab', async () => {
   const client = new BidiClient(process.env.FIREFOX_BIDI_URL ?? 'ws://127.0.0.1:9222/session');
   const browser = new ZenBrowser(client);
   let context: string | undefined;
@@ -74,10 +74,7 @@ test.skipIf(!runIntegration)('probes and exercises supported isolated-context co
   try {
     const capabilities = await browser.capabilities();
     expect(typeof capabilities.browserUserContexts).toBe('boolean');
-    expect(typeof capabilities.emulation).toBe('boolean');
-    expect(typeof capabilities.networkInterception).toBe('boolean');
-    expect(typeof capabilities.storage).toBe('boolean');
-    expect(typeof capabilities.permissions).toBe('boolean');
+    if (!capabilities.browserUserContexts) expect(typeof capabilities.unavailable?.browserUserContexts).toBe('string');
     if (!capabilities.browserUserContexts) return;
 
     const reference = (await browser.contexts())[0];
@@ -85,20 +82,6 @@ test.skipIf(!runIntegration)('probes and exercises supported isolated-context co
     userContext = await browser.createUserContext();
     context = (await browser.openInUserContext('data:text/html,<main>isolated</main>', reference.id, userContext)).id;
     expect(await browser.evaluateValue(context, 'document.body.textContent')).toContain('isolated');
-
-    if (capabilities.storage) expect(await browser.storageExport(userContext)).toBeTruthy();
-    if (capabilities.emulation) {
-      await browser.emulate(context, { viewport: { width: 640, height: 480 } });
-      await browser.resetEmulation(context);
-    }
-    if (capabilities.permissions) {
-      await browser.setPermission(context, 'geolocation', 'denied');
-      await browser.resetPermission(context, 'geolocation');
-    }
-    if (capabilities.networkInterception) {
-      const route = await browser.addRoute({ url: 'https://fixture.invalid/route', phases: ['beforeRequestSent'], action: 'abort' });
-      await browser.removeRoute(route);
-    }
   } finally {
     if (context) await browser.close(context).catch(() => undefined);
     if (userContext) await browser.removeUserContext(userContext).catch(() => undefined);

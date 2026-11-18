@@ -1,8 +1,11 @@
 import type { BidiEvent } from './bidi.ts';
+import type { WaitState } from './browser.ts';
 
 export type WaitPredicate = {
   selector?: string;
   text?: string;
+  /** Applies to `selector` and `text`: wait for them to appear (default) or to disappear. */
+  state?: WaitState;
   url?: string;
   urlChanged?: boolean;
   documentChanged?: boolean;
@@ -33,6 +36,7 @@ function parsePredicate(value: unknown, source: string): WaitPredicate {
     else if (key === 'url' && typeof entry === 'string') condition.url = entry;
     else if ((key === 'urlChanged' || key === 'documentChanged') && typeof entry === 'boolean') condition[key] = entry;
     else if (key === 'pageIdleMs' && typeof entry === 'number' && entry >= 0) condition.pageIdleMs = entry;
+    else if (key === 'state' && (entry === 'visible' || entry === 'hidden')) condition.state = entry;
     else throw new Error(`Wait condition ${JSON.stringify(source)} has an unsupported key or value at ${JSON.stringify(key)}.`);
   }
   if (!Object.keys(condition).length) throw new Error(`Wait condition ${JSON.stringify(source)} has no predicates.`);
@@ -43,8 +47,8 @@ type ScopeBrowser = {
   subscribe(events: string[], contexts?: string[]): Promise<void>;
   unsubscribe(events: string[], contexts?: string[]): Promise<void>;
   onEvent(listener: (event: BidiEvent) => void): () => void;
-  waitFor(context: string, selector: string, timeoutMs: number): Promise<void>;
-  waitForText?(context: string, text: string, timeoutMs: number): Promise<void>;
+  waitFor(context: string, selector: string, timeoutMs: number, state?: WaitState): Promise<void>;
+  waitForText?(context: string, text: string, timeoutMs: number, state?: WaitState): Promise<void>;
   waitForUrl(context: string, expected: string, timeoutMs: number): Promise<void>;
   waitForUrlChange(context: string, previous: string, timeoutMs: number): Promise<void>;
   waitForDocumentChange?(context: string, previous: string, timeoutMs: number): Promise<void>;
@@ -101,13 +105,21 @@ export class ActionScope {
       return { completionReason: 'selectorAppears' };
     }
     if ('anyOf' in condition) {
-      return await Promise.any(condition.anyOf.map((predicate) => this.#waitFor(predicate, previousUrl, previousDocumentId)));
+      try {
+        return await Promise.any(condition.anyOf.map((predicate) => this.#waitFor(predicate, previousUrl, previousDocumentId)));
+      } catch (error) {
+        if (!(error instanceof AggregateError)) throw error;
+        const reasons = error.errors.map((reason, index) => `  [${index}] ${JSON.stringify(condition.anyOf[index])}: ${reason instanceof Error ? reason.message : String(reason)}`);
+        throw new Error(`None of the anyOf wait predicates were satisfied:\n${reasons.join('\n')}`);
+      }
     }
     const waits: Array<Promise<string>> = [];
-    if (condition.selector) waits.push(this.browser.waitFor(this.context, condition.selector, this.timeoutMs).then(() => 'selectorAppears'));
+    const state = condition.state ?? 'visible';
+    if (condition.state !== undefined && !condition.selector && !condition.text) throw new Error('Wait condition state applies only to selector or text predicates.');
+    if (condition.selector) waits.push(this.browser.waitFor(this.context, condition.selector, this.timeoutMs, state).then(() => state === 'visible' ? 'selectorAppears' : 'selectorHidden'));
     if (condition.text) {
       if (!this.browser.waitForText) throw new Error('Text waits are unavailable in this browser transport.');
-      waits.push(this.browser.waitForText(this.context, condition.text, this.timeoutMs).then(() => 'textAppears'));
+      waits.push(this.browser.waitForText(this.context, condition.text, this.timeoutMs, state).then(() => state === 'visible' ? 'textAppears' : 'textHidden'));
     }
     if (condition.url) waits.push(this.browser.waitForUrl(this.context, condition.url, this.timeoutMs).then(() => 'urlMatches'));
     if (condition.urlChanged && previousUrl !== undefined) waits.push(this.browser.waitForUrlChange(this.context, previousUrl, this.timeoutMs).then(() => 'urlChanged'));

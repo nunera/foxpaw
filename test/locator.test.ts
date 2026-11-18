@@ -62,7 +62,7 @@ test('scopes an interactive snapshot to its root and includes a matching root co
   };
   const page = {
     getElementById: () => null,
-    querySelectorAll: (selector: string) => selector === 'input[type=checkbox]' ? [checkbox] : [],
+    querySelectorAll: (selector: string) => selector === 'input[type=checkbox]' || selector === '#terms' ? [checkbox] : [],
   };
   const evaluate = async (_context: string, expression: string) => {
     if (expression === 'location.href + "\\u0000" + performance.timeOrigin') return 'https://example.test\u0000123';

@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test';
-import type { BidiTransport } from '../src/bidi.ts';
-import { ZenBrowser, ZenEmptyTabContextFilter, type Context } from '../src/browser.ts';
+import type { BidiEvent, BidiTransport } from '../src/bidi.ts';
+import { FormInvalidError, InputVerificationError, ZenBrowser, ZenEmptyTabContextFilter, type Context } from '../src/browser.ts';
 
 test('keeps Zen empty-tab contexts private after they navigate', () => {
   const filter = new ZenEmptyTabContextFilter();
@@ -15,23 +15,192 @@ test('keeps Zen empty-tab contexts private after they navigate', () => {
   expect(filter.visible([visible, navigatedHidden, secondHidden, laterBlank]).map((context) => context.id)).toEqual(['visible', 'later-blank']);
 });
 
+// BiDi remote-value serialization of a plain JSON value, as Firefox returns it from script.evaluate/callFunction.
+function remote(value: unknown): Record<string, unknown> {
+  if (value === null) return { type: 'null' };
+  if (value === undefined) return { type: 'undefined' };
+  if (Array.isArray(value)) return { type: 'array', value: value.map(remote) };
+  if (typeof value === 'object') return { type: 'object', value: Object.entries(value).map(([key, item]) => [key, remote(item)]) };
+  return { type: typeof value, value };
+}
+
+type Handler = (method: string, params: Record<string, unknown>) => unknown;
+type Fake = BidiTransport & { commands: string[]; emit(event: BidiEvent): void; subscribed(): Promise<string[]> };
+function fakeBidi(handler: Handler, overrides: Partial<BidiTransport> = {}): Fake {
+  const commands: string[] = [];
+  const listeners = new Set<(event: BidiEvent) => void>();
+  let subscription = Promise.withResolvers<string[]>();
+  return {
+    commands,
+    command: async (method, params = {}) => { commands.push(method); return (await handler(method, params) ?? {}) as Record<string, unknown>; },
+    commandOptional: async (method, params = {}) => { commands.push(method); return (await handler(method, params) ?? {}) as Record<string, unknown>; },
+    onEvent: (listener) => { listeners.add(listener); return () => listeners.delete(listener); },
+    subscribe: async (events) => { subscription.resolve(events); },
+    unsubscribe: async () => {},
+    close: async () => {},
+    emit: (event) => { for (const listener of listeners) listener(event); },
+    // Resolves on the next subscribe call, i.e. once the code under test is listening.
+    subscribed: async () => { const events = await subscription.promise; subscription = Promise.withResolvers<string[]>(); return events; },
+    ...overrides,
+  };
+}
+const evaluated = (value: unknown) => ({ type: 'success', result: remote(value) });
+const declaration = (params: Record<string, unknown>) => typeof params.functionDeclaration === 'string' ? params.functionDeclaration : '';
+const expression = (params: Record<string, unknown>) => typeof params.expression === 'string' ? params.expression : '';
+
 test('rechecks the URL after starting lifecycle subscriptions', async () => {
   let url = 'http://localhost:5173/start';
   let unsubscribed = 0;
-  const bidi: BidiTransport = {
-    command: async (method) => {
-      if (method === 'script.evaluate') return { result: { type: 'string', value: url } };
-      return {};
-    },
-    commandOptional: async () => ({}),
-    onEvent: () => () => {},
+  const bidi = fakeBidi((method) => method === 'script.evaluate' ? evaluated({ href: url, loaded: true }) : {}, {
     subscribe: async () => { url = 'http://localhost:5173/future'; },
     unsubscribe: async () => { unsubscribed++; },
-    close: async () => {},
-  };
+  });
 
-  await expect(new ZenBrowser(bidi).waitForUrl('ctx', '/future', 50)).resolves.toBeUndefined();
+  await expect(new ZenBrowser(bidi).waitForUrl('ctx', '/future', 500)).resolves.toBeUndefined();
   expect(unsubscribed).toBe(1);
+});
+
+test('URL waits ignore the query string and require the matching document to have loaded', async () => {
+  let state = { href: 'https://sso.example/login?service=https%3A%2F%2Fhowdy.tamu.edu%2F', loaded: true };
+  const browser = new ZenBrowser(fakeBidi((method) => method === 'script.evaluate' ? evaluated(state) : {}));
+  await expect(browser.waitForUrl('ctx', 'howdy.tamu.edu', 150)).rejects.toThrow('Timed out');
+  await expect(browser.waitForUrl('ctx', 'service=https', 150)).rejects.toThrow('Timed out');
+  await expect(browser.waitForUrl('ctx', '?service=https', 150)).resolves.toBeUndefined();
+  state = { href: 'https://howdy.tamu.edu/home#done', loaded: false };
+  await expect(browser.waitForUrl('ctx', 'howdy.tamu.edu', 150)).rejects.toThrow('Timed out');
+  state = { ...state, loaded: true };
+  await expect(browser.waitForUrl('ctx', 'howdy.tamu.edu/home#done', 150)).resolves.toBeUndefined();
+});
+
+test('URL waits complete on domContentLoaded for the URL, never on navigationStarted', async () => {
+  const bidi = fakeBidi((method) => method === 'script.evaluate' ? evaluated({ href: 'https://a.example/form', loaded: true }) : {});
+  const browser = new ZenBrowser(bidi);
+  const started = browser.waitForUrl('ctx', '/confirmation', 300);
+  await bidi.subscribed();
+  bidi.emit({ method: 'browsingContext.navigationStarted', params: { context: 'ctx', url: 'https://a.example/confirmation' } });
+  await expect(started).rejects.toThrow('Timed out');
+  const loaded = browser.waitForUrl('ctx', '/confirmation', 300);
+  await bidi.subscribed();
+  bidi.emit({ method: 'browsingContext.domContentLoaded', params: { context: 'ctx', url: 'https://a.example/confirmation' } });
+  await expect(loaded).resolves.toBeUndefined();
+});
+
+test('tracks open dialogs, skips page evaluation for them, and clears them once handled', async () => {
+  const evaluatedContexts: unknown[] = [];
+  const bidi = fakeBidi((method, params) => {
+    if (method === 'browsingContext.getTree') return { contexts: [{ context: 'a', url: 'https://a.example/', children: [] }, { context: 'b', url: 'https://b.example/', children: [] }] };
+    if (method === 'script.evaluate') {
+      const target = params.target;
+      evaluatedContexts.push(target && typeof target === 'object' && 'context' in target ? target.context : undefined);
+      return evaluated('Title');
+    }
+    return {};
+  });
+  const browser = new ZenBrowser(bidi);
+  const watching = browser.watchPrompts();
+  await expect(bidi.subscribed()).resolves.toEqual(['browsingContext.userPromptOpened', 'browsingContext.userPromptClosed', 'browsingContext.contextDestroyed']);
+  await watching;
+  await browser.watchPrompts();
+
+  const watcher = browser.promptOpened('a');
+  bidi.emit({ method: 'browsingContext.userPromptOpened', params: { context: 'a', type: 'confirm', message: 'Drop CSCE 312?', handler: 'ignore' } });
+  await expect(watcher.opened).resolves.toEqual({ type: 'confirm', message: 'Drop CSCE 312?' });
+  watcher.stop();
+  expect(browser.openPrompt('a')).toEqual({ type: 'confirm', message: 'Drop CSCE 312?' });
+
+  const contexts = await browser.contexts();
+  expect(evaluatedContexts).toEqual(['b']);
+  expect(contexts.find((context) => context.id === 'a')?.title).toBeUndefined();
+
+  await browser.handlePrompt('a', false);
+  expect(bidi.commands).toContain('browsingContext.handleUserPrompt');
+  expect(browser.openPrompt('a')).toBeUndefined();
+});
+
+test('reload uses browsingContext.reload', async () => {
+  const bidi = fakeBidi(() => ({}));
+  await new ZenBrowser(bidi).reload('ctx');
+  expect(bidi.commands).toEqual(['browsingContext.reload']);
+});
+
+test('wait_event matches events whose source is the tab', async () => {
+  const bidi = fakeBidi(() => ({}));
+  const waiting = new ZenBrowser(bidi).waitForEvent('ctx', ['log.entryAdded'], 200);
+  await bidi.subscribed();
+  bidi.emit({ method: 'log.entryAdded', params: { source: { context: 'other' }, text: 'no' } });
+  bidi.emit({ method: 'log.entryAdded', params: { source: { context: 'ctx' }, text: 'yes' } });
+  await expect(waiting).resolves.toMatchObject({ params: { text: 'yes' } });
+});
+
+test('the capability probe only lists user contexts', async () => {
+  const bidi = fakeBidi(() => ({ userContexts: [] }));
+  await expect(new ZenBrowser(bidi).capabilities()).resolves.toEqual({ browserUserContexts: true });
+  expect(bidi.commands).toEqual(['browser.getUserContexts']);
+});
+
+const node = { type: 'success', result: { type: 'node', sharedId: 'element' } };
+const point = evaluated({ x: 10, y: 10, identity: { tag: 'select', role: 'combobox', name: null } });
+
+test('select sets the option directly with one input/change and no key presses', async () => {
+  let selectedIndex = 0;
+  const bidi = fakeBidi((method, params) => {
+    if (method === 'script.evaluate') return expression(params).includes('interactiveTarget') ? point : node;
+    if (method === 'script.callFunction') {
+      if (declaration(params).includes("new Event('change'")) { selectedIndex = 2; return evaluated({ index: 2, changed: true }); }
+      if (declaration(params).includes('selectedIndex')) return evaluated(selectedIndex);
+    }
+    return {};
+  });
+  await expect(new ZenBrowser(bidi).select('ctx', '#term', 'Spring 2027')).resolves.toEqual({ selectedIndex: 2, changed: true });
+  expect(bidi.commands).not.toContain('input.performActions');
+});
+
+test('select refuses disabled options and reports a lost selection as unverified input', async () => {
+  const refusing = fakeBidi((method, params) => {
+    if (method === 'script.evaluate') return expression(params).includes('interactiveTarget') ? point : node;
+    if (method === 'script.callFunction') return { type: 'exception', exceptionDetails: { text: 'Error: Option "Choose a term" is disabled and cannot be selected' } };
+    return {};
+  });
+  await expect(new ZenBrowser(refusing).select('ctx', '#term', 'Choose a term')).rejects.toThrow('is disabled');
+
+  const reset = fakeBidi((method, params) => {
+    if (method === 'script.evaluate') return expression(params).includes('interactiveTarget') ? point : node;
+    if (method === 'script.callFunction') return declaration(params).includes("new Event('change'") ? evaluated({ index: 2, changed: true }) : evaluated(0);
+    return {};
+  });
+  await expect(new ZenBrowser(reset).select('ctx', '#term', 'Spring 2027')).rejects.toBeInstanceOf(InputVerificationError);
+});
+
+test('check polls the read-back, then reports clicked-but-unchanged input as unverified', async () => {
+  let reads = 0;
+  const bidi = fakeBidi((method, params) => {
+    if (method === 'script.evaluate') return expression(params).includes('interactiveTarget') ? evaluated({ x: 1, y: 1, identity: { tag: 'input', role: 'checkbox', name: null } }) : node;
+    if (method === 'script.callFunction') {
+      if (declaration(params).includes('Target is not a checkable input')) return evaluated(false);
+      if (declaration(params).includes('const label')) return evaluated(false);
+      if (declaration(params) === 'element => element.checked') { reads++; return evaluated(false); }
+    }
+    return {};
+  });
+  // check() polls with real sleeps for its fixed one-second settle window; the elapsed time is the behavior under test.
+  const started = Date.now();
+  const error = await new ZenBrowser(bidi).check('ctx', '#c', true).catch((caught: unknown) => caught);
+  expect(error).toBeInstanceOf(InputVerificationError);
+  expect(Date.now() - started).toBeGreaterThanOrEqual(900);
+  expect(reads).toBeGreaterThan(1);
+  expect(bidi.commands).toContain('input.performActions');
+});
+
+test('submitForm reports invalid fields instead of a silent no-op', async () => {
+  const bidi = fakeBidi((method) => {
+    if (method === 'script.evaluate') return node;
+    if (method === 'script.callFunction') return evaluated({ submitted: false, invalidFields: [{ name: 'email', validationMessage: 'Please enter an email address.' }] });
+    return {};
+  });
+  const error = await new ZenBrowser(bidi).submitForm('ctx', '#send').catch((caught: unknown) => caught);
+  expect(error).toBeInstanceOf(FormInvalidError);
+  if (!(error instanceof FormInvalidError)) throw error;
+  expect(error.invalidFields).toEqual([{ name: 'email', validationMessage: 'Please enter an email address.' }]);
 });
 
 function pageChangeSnapshot(snapshot: { url: string; documentId: string; text: string; elementCount: number }) {

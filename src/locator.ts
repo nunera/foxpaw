@@ -8,9 +8,13 @@ type Evaluator = (context: string, expression: string) => Promise<unknown>;
 // Inspection and action resolution must select the same node, including controls without IDs.
 const selectorFunction = `element => {
   const segment = node => {
+    const root = node.getRootNode();
     const parts = [];
     while (node && node.nodeType === Node.ELEMENT_NODE) {
-      if (node.id) { parts.unshift('#' + CSS.escape(node.id)); break; }
+      if (node.id) {
+        const byId = '#' + CSS.escape(node.id);
+        if (root.querySelectorAll(byId).length === 1) { parts.unshift(byId); break; }
+      }
       const siblings = node.parentElement ? [...node.parentElement.children].filter(s => s.tagName === node.tagName) : [];
       parts.unshift(node.tagName.toLowerCase() + (siblings.length > 1 ? ':nth-of-type(' + (siblings.indexOf(node) + 1) + ')' : ''));
       node = node.parentElement;
@@ -54,7 +58,8 @@ export async function resolveLocator(evaluate: Evaluator, context: string, locat
     ${semanticFunctions}
     const css = ${selectorFunction};
     walk(scope);
-    const candidates = locator.css && !locator.role && !locator.within && !locator.css.includes('>>>')
+    const plain = locator.css && locator.role === undefined && locator.name === undefined && locator.checked === undefined && locator.disabled === undefined && locator.within === undefined && !locator.css.includes('>>>');
+    const candidates = plain
       ? [...document.querySelectorAll(locator.css)]
       : findCss().filter(element => {
         const currentRole = role(element);
@@ -64,7 +69,8 @@ export async function resolveLocator(evaluate: Evaluator, context: string, locat
       });
     if (candidates.length !== 1) throw new Error('Expected exactly one locator match, found ' + candidates.length);
     const element = candidates[0];
-    return { selector: locator.css && !locator.within ? locator.css : css(element), identity: { tag: element.tagName.toLowerCase(), role: role(element), name: name(element) } };
+    const rawUnique = locator.css && !locator.css.includes('>>>') && (() => { const matches = document.querySelectorAll(locator.css); return matches.length === 1 && matches[0] === element; })();
+    return { selector: rawUnique ? locator.css : css(element), identity: { tag: element.tagName.toLowerCase(), role: role(element), name: name(element) } };
   })()`);
   if (!result || typeof result !== 'object') throw new Error('Firefox returned malformed locator result');
   const record = result as { selector?: unknown; identity?: ElementIdentity };

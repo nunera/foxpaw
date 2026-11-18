@@ -31,6 +31,7 @@ const unsupportedErrors = new Set(['unknown command', 'unsupported operation', '
 
 export class BidiClient {
   #socket?: WebSocket;
+  #connecting?: Promise<void>;
   #nextId = 1;
   #sessionStarted = false;
   #sessionInfo?: JsonObject;
@@ -43,20 +44,27 @@ export class BidiClient {
     if (!['ws:', 'wss:'].includes(endpoint.protocol)) throw new Error(`WebDriver BiDi requires a WebSocket URL, received ${endpoint.protocol}`);
   }
 
+  // Concurrent first callers share one in-flight socket open + session.new instead of racing it.
   async connect(): Promise<void> {
-    if (this.#socket) return;
+    if (this.#sessionStarted) return;
+    await (this.#connecting ??= this.#open().finally(() => { this.#connecting = undefined; }));
+  }
+
+  async #open(): Promise<void> {
     const socket = new WebSocket(this.url);
     this.#socket = socket;
     socket.addEventListener('message', (event) => this.#receive(event.data));
     socket.addEventListener('close', () => this.#disconnect(new Error('WebDriver BiDi connection closed')));
     socket.addEventListener('error', () => this.#disconnect(new Error('WebDriver BiDi connection failed')));
-    await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error(`Timed out connecting to ${this.url}`)), this.timeoutMs);
-      socket.addEventListener('open', () => { clearTimeout(timer); resolve(); }, { once: true });
-      socket.addEventListener('error', () => { clearTimeout(timer); reject(new Error(`Unable to connect to ${this.url}`)); }, { once: true });
-    });
     try {
-      this.#sessionInfo = await this.#request('session.new', { capabilities: { alwaysMatch: {}, firstMatch: [{}] } });
+      const opened = Promise.withResolvers<void>();
+      const timer = setTimeout(() => opened.reject(new Error(`Timed out connecting to ${this.url}`)), this.timeoutMs);
+      socket.addEventListener('open', () => { clearTimeout(timer); opened.resolve(); }, { once: true });
+      socket.addEventListener('error', () => { clearTimeout(timer); opened.reject(new Error(`Unable to connect to ${this.url}`)); }, { once: true });
+      await opened.promise;
+      // `ignore` keeps Firefox from auto-accepting or auto-dismissing every alert/confirm/prompt/beforeunload
+      // in the user's real tabs while this session exists; the relay reports open prompts instead.
+      this.#sessionInfo = await this.#request('session.new', { capabilities: { alwaysMatch: { unhandledPromptBehavior: { default: 'ignore' } }, firstMatch: [{}] } });
       this.#sessionStarted = true;
     } catch (error) {
       socket.close();

@@ -83,3 +83,42 @@ test('supports text and anyOf completion predicates', async () => {
   await scope.arm('{"anyOf":[{"selector":"#missing"},{"text":"Correct!"}]}');
   await expect(scope.run(async () => {})).resolves.toMatchObject({ completionReason: 'textAppears' });
 });
+
+test('forwards hidden state to selector and text waits', async () => {
+  const calls: string[] = [];
+  const browser = {
+    subscribe: async () => {},
+    unsubscribe: async () => {},
+    onEvent: () => () => {},
+    waitFor: async (_context: string, selector: string, _timeout: number, state?: string) => { calls.push(`selector:${selector}:${state}`); },
+    waitForText: async (_context: string, text: string, _timeout: number, state?: string) => { calls.push(`text:${text}:${state}`); },
+    waitForUrl: async () => {},
+    waitForUrlChange: async () => {},
+  };
+  const scope = new ActionScope(browser, 'ctx', 'click', 100);
+  await scope.arm({ selector: '.spinner', text: 'Loading...', state: 'hidden' });
+  await expect(scope.run(async () => {})).resolves.toMatchObject({ completionReason: 'selectorHidden+textHidden' });
+  expect(calls).toEqual(['selector:.spinner:hidden', 'text:Loading...:hidden']);
+  const bare = new ActionScope(browser, 'ctx', 'click', 100);
+  await bare.arm({ state: 'hidden' });
+  await expect(bare.run(async () => {})).rejects.toThrow('state applies only to selector or text');
+});
+
+test('anyOf failure lists every predicate reason', async () => {
+  const browser = {
+    subscribe: async () => {},
+    unsubscribe: async () => {},
+    onEvent: () => () => {},
+    waitFor: async () => { throw new Error('selector timed out'); },
+    waitForText: async () => { throw new Error('text timed out'); },
+    waitForUrl: async () => {},
+    waitForUrlChange: async () => {},
+  };
+  const scope = new ActionScope(browser, 'ctx', 'click', 100);
+  await scope.arm({ anyOf: [{ selector: '#a' }, { text: 'Done' }] });
+  const failure = await scope.run(async () => {}).then(() => undefined, (error: Error) => error);
+  expect(failure?.message).toContain('selector timed out');
+  expect(failure?.message).toContain('text timed out');
+  expect(failure?.message).toContain('#a');
+  expect(failure?.message).toContain('Done');
+});

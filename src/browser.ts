@@ -1,7 +1,6 @@
 import { type BidiTransport, type BidiEvent, type JsonObject } from './bidi.ts';
 import { detectCapabilities, type DetectedCapabilities } from './capabilities.ts';
 import { documentFrame, resolveLocator, semanticFunctions, type ElementIdentity, type FrameRef, type Locator, type ResolvedLocator } from './locator.ts';
-import { RouteManager, type RouteDefinition } from './routes.ts';
 
 export type Context = {
   id: string;
@@ -33,6 +32,7 @@ export type TextEntryResult = { requestedValue: string; actualValue: string; foc
 export type OpenResult = { context: Context; created: true; navigationStarted: boolean; error?: string };
 export type PageChangeResult = { type: 'navigation' | 'dom'; changedCharacters?: number; changedElements?: number };
 export type PageSummary = { heading: string | null; text: string };
+export type WaitState = 'visible' | 'hidden';
 export type FieldState = {
   selector: string;
   tag: string;
@@ -61,19 +61,64 @@ export class PageEvaluationError extends Error {
   }
 }
 
+/** Input was sent to the page, but reading the control back did not show the requested state. Retrying repeats the input. */
+export class InputVerificationError extends Error {
+  override readonly name = 'InputVerificationError';
+}
+
+export type InvalidField = { name: string; validationMessage: string };
+/** Constraint validation blocked the submission; nothing was submitted. */
+export class FormInvalidError extends Error {
+  override readonly name = 'FormInvalidError';
+  constructor(readonly invalidFields: InvalidField[]) {
+    super(`Form not submitted: ${invalidFields.length} field(s) fail validation`);
+  }
+}
+
+export type OpenPrompt = { type: string; message: string; defaultValue?: string };
+const PROMPT_EVENTS = ['browsingContext.userPromptOpened', 'browsingContext.userPromptClosed', 'browsingContext.contextDestroyed'];
+
 export class ZenBrowser {
-  #routes: RouteManager;
   #capabilities?: Promise<DetectedCapabilities>;
+  #prompts = new Map<string, OpenPrompt>();
+  #promptWatch?: Promise<void>;
 
   constructor(readonly bidi: BidiTransport) {
-    this.#routes = new RouteManager(bidi);
+    bidi.onEvent((event) => {
+      const context = event.params.context;
+      if (typeof context !== 'string') return;
+      if (event.method === 'browsingContext.userPromptOpened') this.#prompts.set(context, asPrompt(event.params));
+      else if (event.method === 'browsingContext.userPromptClosed' || event.method === 'browsingContext.contextDestroyed') this.#prompts.delete(context);
+    });
+  }
+
+  /** Subscribes once, session-wide, to user-prompt lifecycle events so open dialogs can be reported per tab. */
+  async watchPrompts(): Promise<void> {
+    await (this.#promptWatch ??= this.subscribe(PROMPT_EVENTS).catch((error: unknown) => {
+      this.#promptWatch = undefined;
+      throw error;
+    }));
+  }
+
+  /** The alert/confirm/prompt/beforeunload dialog currently open in a top-level context, if one was observed. */
+  openPrompt(context: string): OpenPrompt | undefined {
+    return this.#prompts.get(context);
+  }
+
+  /** Resolves when a dialog opens in `context`; `stop` detaches the listener. */
+  promptOpened(context: string): { opened: Promise<OpenPrompt>; stop(): void } {
+    const deferred = Promise.withResolvers<OpenPrompt>();
+    const stop = this.onEvent((event) => {
+      if (event.method === 'browsingContext.userPromptOpened' && event.params.context === context) deferred.resolve(asPrompt(event.params));
+    });
+    return { opened: deferred.promise, stop };
   }
 
   async capabilities(): Promise<DetectedCapabilities> {
     return await (this.#capabilities ??= detectCapabilities(this.bidi));
   }
 
-  async requireFeature(feature: keyof Omit<DetectedCapabilities, 'diagnostics'>): Promise<void> {
+  async requireFeature(feature: 'browserUserContexts'): Promise<void> {
     if (!(await this.capabilities())[feature]) throw new Error(`Feature unavailable in this Zen/Firefox build: ${feature}`);
   }
 
@@ -92,7 +137,9 @@ export class ZenBrowser {
   async contexts(): Promise<Context[]> {
     const result = await this.bidi.command('browsingContext.getTree', { maxDepth: 16 });
     const contexts = flattenContexts(result.contexts);
+    // A context with an open dialog would block or fail page evaluation; its title is left unknown.
     return await Promise.all(contexts.map(async (context) => {
+      if (this.#prompts.has(context.id)) return context;
       try {
         const title = await this.evaluate(context.id, 'document.title');
         const remote = title.result as JsonObject | undefined;
@@ -101,6 +148,12 @@ export class ZenBrowser {
         return context;
       }
     }));
+  }
+
+  /** IDs of `context` and every frame inside it, from the browser's tree without evaluating page script. */
+  async treeIds(context: string): Promise<string[]> {
+    const result = await this.bidi.command('browsingContext.getTree', { root: context });
+    return flattenContexts(result.contexts).map((entry) => entry.id);
   }
 
   async frames(context: string): Promise<FrameRef[]> {
@@ -162,7 +215,7 @@ export class ZenBrowser {
   }
 
   async reload(context: string): Promise<void> {
-    await this.navigate(context, await this.url(context));
+    await this.bidi.command('browsingContext.reload', { context, wait: 'complete' });
   }
 
   async traverseHistory(context: string, delta: number): Promise<void> {
@@ -175,6 +228,7 @@ export class ZenBrowser {
       accept,
       ...(userText === undefined ? {} : { userText }),
     });
+    this.#prompts.delete(context);
   }
 
   async screenshot(context: string, options: ScreenshotOptions = {}): Promise<string> {
@@ -229,7 +283,8 @@ export class ZenBrowser {
     const deferred = Promise.withResolvers<BidiEvent>();
     const timer = setTimeout(() => deferred.reject(new Error(`Timed out waiting for ${methods.join(', ')}`)), timeoutMs);
     const stop = this.onEvent((event) => {
-      if (methods.includes(event.method) && event.params.context === context) deferred.resolve(event);
+      const source = event.params.source as { context?: unknown } | undefined;
+      if (methods.includes(event.method) && (event.params.context === context || source?.context === context)) deferred.resolve(event);
     });
     try {
       return await deferred.promise;
@@ -240,33 +295,36 @@ export class ZenBrowser {
     }
   }
 
-  async waitFor(context: string, selector: string, timeoutMs = 10_000): Promise<void> {
+  // Waits also search same-origin iframes; cross-origin frame content is unreachable from the top document.
+  async waitFor(context: string, selector: string, timeoutMs = 10_000, state: WaitState = 'visible'): Promise<void> {
     const visible = await this.evaluateValue(context, `new Promise((resolve, reject) => {
-      const ready = () => {
-        const element = (() => { let root = document; let element; for (const part of __SELECTOR__.split('>>>').map(part => part.trim())) { element = root.querySelector(part); if (!element) return null; root = element.shadowRoot ?? element; } return element; })();
-        return Boolean(element?.getClientRects().length && getComputedStyle(element).visibility !== 'hidden');
-      };
+      ${SAME_ORIGIN_DOCUMENTS}
+      const shown = (doc) => { let root = doc; let element; for (const part of __SELECTOR__.split('>>>').map(part => part.trim())) { element = root.querySelector(part); if (!element) return false; root = element.shadowRoot ?? element; } return Boolean(element.getClientRects().length && element.ownerDocument.defaultView.getComputedStyle(element).visibility !== 'hidden'); };
+      const ready = () => documents().some(shown) === __WANT_VISIBLE__;
       if (ready()) return resolve(true);
-      const observer = new MutationObserver(() => { if (ready()) { observer.disconnect(); clearTimeout(timer); resolve(true); } });
-      const timer = setTimeout(() => { observer.disconnect(); reject(new Error('Timed out waiting for selector')); }, ${'__TIMEOUT__'});
+      const finish = () => { observer.disconnect(); clearInterval(poll); clearTimeout(timer); resolve(true); };
+      const observer = new MutationObserver(() => { if (ready()) finish(); });
+      const poll = setInterval(() => { if (ready()) finish(); }, 100);
+      const timer = setTimeout(() => { observer.disconnect(); clearInterval(poll); reject(new Error('Timed out waiting for selector to become __STATE__')); }, ${'__TIMEOUT__'});
       observer.observe(document, { childList: true, subtree: true, attributes: true });
-    })`.replace('__SELECTOR__', JSON.stringify(selector)).replace('__TIMEOUT__', String(timeoutMs)), timeoutMs + IN_PAGE_WAIT_MARGIN_MS);
-    if (visible !== true) throw new Error(`Timed out waiting for ${JSON.stringify(selector)}`);
+    })`.replace('__SELECTOR__', JSON.stringify(selector)).replace('__WANT_VISIBLE__', String(state === 'visible')).replace('__STATE__', state).replace('__TIMEOUT__', String(timeoutMs)), timeoutMs + IN_PAGE_WAIT_MARGIN_MS);
+    if (visible !== true) throw new Error(`Timed out waiting for ${JSON.stringify(selector)} to become ${state}`);
   }
 
-  async waitForText(context: string, text: string, timeoutMs = 10_000): Promise<void> {
+  async waitForText(context: string, text: string, timeoutMs = 10_000, state: WaitState = 'visible'): Promise<void> {
     const found = await this.evaluateValue(context, `new Promise((resolve, reject) => {
-      const ready = () => document.body?.innerText?.includes(${JSON.stringify(text)}) ?? false;
+      ${SAME_ORIGIN_DOCUMENTS}
+      const ready = () => documents().some((doc) => doc.body?.innerText?.includes(${JSON.stringify(text)}) ?? false) === ${state === 'visible'};
       if (ready()) return resolve(true);
       let observer;
       let poll;
       const finish = () => { observer?.disconnect(); clearInterval(poll); clearTimeout(timeout); resolve(true); };
-      const timeout = setTimeout(() => { observer?.disconnect(); clearInterval(poll); reject(new Error('Timed out waiting for text')); }, ${timeoutMs});
+      const timeout = setTimeout(() => { observer?.disconnect(); clearInterval(poll); reject(new Error('Timed out waiting for text to become ${state}')); }, ${timeoutMs});
       observer = new MutationObserver(() => { if (ready()) finish(); });
       poll = setInterval(() => { if (ready()) finish(); }, 25);
       observer.observe(document, { childList: true, subtree: true, characterData: true, attributes: true });
     })`, timeoutMs + IN_PAGE_WAIT_MARGIN_MS);
-    if (found !== true) throw new Error(`Timed out waiting for text ${JSON.stringify(text)}`);
+    if (found !== true) throw new Error(`Timed out waiting for text ${JSON.stringify(text)} to become ${state}`);
   }
 
   async waitForDocumentChange(context: string, previous: string, timeoutMs = 10_000): Promise<void> {
@@ -291,7 +349,8 @@ export class ZenBrowser {
     if (settled !== true) throw new Error('Timed out waiting for page idle');
   }
 
-  async waitForPageChange(context: string, timeoutMs = 10_000): Promise<PageChangeResult> {
+  // `root` scopes the comparison to one element where any text or element-count change counts; a root that is absent counts as empty, so its appearance is a change.
+  async waitForPageChange(context: string, timeoutMs = 10_000, root?: string): Promise<PageChangeResult> {
     const lifecycleEvents = ['browsingContext.navigationStarted', 'browsingContext.domContentLoaded', 'browsingContext.load'];
     let navigationStarted = false;
     const stop = this.onEvent((event) => {
@@ -299,7 +358,7 @@ export class ZenBrowser {
     });
     await this.subscribe(lifecycleEvents, [context]);
     try {
-      let previous = await this.#pageChangeSnapshot(context);
+      let previous = await this.#pageChangeSnapshot(context, root);
       const deadline = Date.now() + timeoutMs;
       while (Date.now() < deadline) {
         if (navigationStarted) return { type: 'navigation' };
@@ -307,7 +366,7 @@ export class ZenBrowser {
         if (navigationStarted) return { type: 'navigation' };
         let current;
         try {
-          current = await this.#pageChangeSnapshot(context);
+          current = await this.#pageChangeSnapshot(context, root);
         } catch (error) {
           if (navigationStarted) return { type: 'navigation' };
           throw error;
@@ -315,7 +374,7 @@ export class ZenBrowser {
         if (current.documentId !== previous.documentId || current.url !== previous.url) return { type: 'navigation' };
         const changedCharacters = changedCharacterCount(previous.text, current.text);
         const changedElements = Math.abs(previous.elementCount - current.elementCount);
-        if (changedCharacters >= 24 || changedElements >= 3) {
+        if (root === undefined ? changedCharacters >= 24 || changedElements >= 3 : changedCharacters > 0 || changedElements > 0 || current.text !== previous.text) {
           return { type: 'dom', ...(changedCharacters ? { changedCharacters } : {}), ...(changedElements ? { changedElements } : {}) };
         }
         previous = current;
@@ -327,9 +386,9 @@ export class ZenBrowser {
     }
   }
 
-  async #pageChangeSnapshot(context: string): Promise<{ url: string; documentId: string; text: string; elementCount: number }> {
+  async #pageChangeSnapshot(context: string, rootSelector?: string): Promise<{ url: string; documentId: string; text: string; elementCount: number }> {
     const value = await this.evaluateValue(context, `(() => {
-      const root = document.querySelector('main,[role="main"],#app,#root') ?? document.body;
+      const root = ${rootSelector === undefined ? `document.querySelector('main,[role="main"],#app,#root') ?? document.body` : `document.querySelector(${JSON.stringify(rootSelector)})`};
       return {
         url: location.href,
         documentId: location.href + '\\u0000' + performance.timeOrigin,
@@ -360,45 +419,55 @@ export class ZenBrowser {
     return { heading: value.heading, text: value.text };
   }
 
+  /** Matches `expected` against the URL without its query string (a `?` in `expected` matches the full URL), once that document has loaded. */
   async waitForUrl(context: string, expected: string, timeoutMs = 10_000): Promise<void> {
-    await this.#waitForLifecycle(context, (url) => url.includes(expected), `URL containing ${JSON.stringify(expected)}`, timeoutMs);
+    await this.#waitForLoadedUrl(context, (url) => urlMatches(url, expected), `a loaded URL matching ${JSON.stringify(expected)}`, timeoutMs);
   }
 
   async waitForUrlChange(context: string, previous: string, timeoutMs = 10_000): Promise<void> {
-    await this.#waitForLifecycle(context, (url) => url !== previous, `URL to change from ${JSON.stringify(previous)}`, timeoutMs);
+    await this.#waitForLoadedUrl(context, (url) => url !== previous, `a loaded URL other than ${JSON.stringify(previous)}`, timeoutMs);
   }
 
-  async #waitForLifecycle(context: string, predicate: (url: string) => boolean, description: string, timeoutMs: number): Promise<void> {
-    if (predicate(await this.url(context))) return;
-    const events = ['browsingContext.navigationStarted', 'browsingContext.domContentLoaded', 'browsingContext.load'];
-    await this.subscribe(events, [context]);
+  // Completes only once a document with a matching URL has parsed (domContentLoaded/load, or readyState past
+  // "loading"), never on navigationStarted, whose URL is a destination that has not loaded yet.
+  async #waitForLoadedUrl(context: string, predicate: (url: string) => boolean, description: string, timeoutMs: number): Promise<void> {
+    const loadedMatch = async () => {
+      const state = await this.evaluateValue(context, '({ href: location.href, loaded: document.readyState !== "loading" })');
+      return Boolean(state && typeof state === 'object' && 'href' in state && 'loaded' in state && typeof state.href === 'string' && state.loaded === true && predicate(state.href));
+    };
+    if (await loadedMatch()) return;
+    const events = ['browsingContext.domContentLoaded', 'browsingContext.load'];
+    const done = Promise.withResolvers<void>();
+    let settled = false;
+    const settle = (error?: Error) => {
+      if (settled) return;
+      settled = true;
+      if (error) done.reject(error); else done.resolve();
+    };
+    // Listen before subscribing so no event between the subscription and the listener is lost.
+    const stop = this.onEvent((event) => {
+      if (event.params.context === context && events.includes(event.method) && typeof event.params.url === 'string' && predicate(event.params.url)) settle();
+    });
+    const timer = setTimeout(() => settle(new Error(`Timed out waiting for ${description}`)), timeoutMs);
+    // Polling also catches same-document URL changes (pushState, fragments), which emit no load event.
+    // Evaluation can fail while a navigation replaces the document; the next check retries.
+    let polling = false;
+    const check = () => {
+      if (polling || settled) return;
+      polling = true;
+      void loadedMatch().then((matched) => { if (matched) settle(); }, () => undefined).finally(() => { polling = false; });
+    };
+    const poll = setInterval(check, 100);
     try {
-      await new Promise<void>((resolve, reject) => {
-        let settled = false;
-        let timer: Timer | undefined;
-        let poll: Timer | undefined;
-        let stop: (() => void) | undefined;
-        const settle = (error?: Error) => {
-          if (settled) return;
-          settled = true;
-          clearTimeout(timer);
-          clearInterval(poll);
-          stop?.();
-          if (error) reject(error); else resolve();
-        };
-        const check = (url: unknown) => {
-          if (typeof url === 'string' && predicate(url)) settle();
-        };
-        timer = setTimeout(() => settle(new Error(`Timed out waiting for ${description}`)), timeoutMs);
-        stop = this.onEvent((event) => {
-          if (event.params.context === context) check(event.params.url);
-        });
-        void this.url(context).then(check, (error: unknown) => settle(error instanceof Error ? error : new Error(String(error))));
-        poll = setInterval(() => {
-          void this.url(context).then(check, (error: unknown) => settle(error instanceof Error ? error : new Error(String(error))));
-        }, 25);
-      });
-    } finally { await this.unsubscribe(events, [context]).catch(() => undefined); }
+      await this.subscribe(events, [context]);
+      check();
+      await done.promise;
+    } finally {
+      clearTimeout(timer);
+      clearInterval(poll);
+      stop();
+      await this.unsubscribe(events, [context]).catch(() => undefined);
+    }
   }
 
   async click(context: string, selector: string, expected?: ElementIdentity): Promise<ElementIdentity> {
@@ -518,7 +587,7 @@ export class ZenBrowser {
     if (typeof actualValue !== 'string') throw new Error(`Firefox did not return a text value for ${JSON.stringify(selector)}`);
     const requestedValue = replace ? text : valueBefore + text;
     if (actualValue !== requestedValue) {
-      throw new Error(`Page cleared or changed the entered value after native input for ${JSON.stringify(selector)}: expected ${JSON.stringify(requestedValue)}, received ${JSON.stringify(actualValue)}`);
+      throw new InputVerificationError(`Keys were sent, but the field now reads ${JSON.stringify(actualValue)} instead of ${JSON.stringify(requestedValue)} for ${JSON.stringify(selector)}`);
     }
     return { requestedValue, actualValue, focused: true, replaced: replace };
   }
@@ -536,30 +605,31 @@ export class ZenBrowser {
     await this.evaluate(context, `window.scrollBy(${dx}, ${dy})`);
   }
 
-  async select(context: string, selector: string, value: string): Promise<void> {
+  // Sets the option directly and fires one bubbling input + change, as a single user choice would; keyboard
+  // stepping would skip disabled options and fire change on every option it passes.
+  async select(context: string, selector: string, value: string): Promise<{ selectedIndex: number; changed: boolean }> {
     await this.coordinates(context, selector);
-    const index = await this.#withElement(context, selector, `element => {
+    const outcome = await this.#withElement(context, selector, `element => {
       if (!(element instanceof HTMLSelectElement)) throw new Error('Target is not a select element');
-      const index = [...element.options].findIndex(option => option.value === ${JSON.stringify(value)} || option.text.trim() === ${JSON.stringify(value)});
+      if (element.disabled) throw new Error('Select element is disabled');
+      const options = [...element.options];
+      const requested = ${JSON.stringify(value)};
+      const byValue = options.findIndex(option => option.value === requested);
+      const index = byValue >= 0 ? byValue : options.findIndex(option => option.text.trim() === requested);
       if (index < 0) throw new Error('No option has the requested value or visible text');
+      const option = options[index];
+      if (option.disabled || option.closest('optgroup')?.disabled) throw new Error('Option ' + JSON.stringify(option.text.trim()) + ' is disabled and cannot be selected');
+      if (element.selectedIndex === index) return { index, changed: false };
       element.focus();
-      return index;
+      element.selectedIndex = index;
+      element.dispatchEvent(new Event('input', { bubbles: true }));
+      element.dispatchEvent(new Event('change', { bubbles: true }));
+      return { index, changed: true };
     }`);
-    if (typeof index !== 'number') throw new Error(`Firefox did not return an option index for ${JSON.stringify(selector)}`);
-    await this.bidi.command('input.performActions', {
-      context,
-      actions: [{
-        type: 'key',
-        id: 'keyboard',
-        actions: [
-          { type: 'keyDown', value: '\uE011' },
-          { type: 'keyUp', value: '\uE011' },
-          ...Array.from({ length: index }).flatMap(() => [{ type: 'keyDown', value: '\uE015' }, { type: 'keyUp', value: '\uE015' }]),
-        ],
-      }],
-    });
-    const selected = await this.#withElement(context, selector, 'element => element instanceof HTMLSelectElement ? element.selectedIndex : undefined');
-    if (selected !== index) throw new Error(`Native selection did not update ${JSON.stringify(selector)}`);
+    if (!outcome || typeof outcome !== 'object' || !('index' in outcome) || typeof outcome.index !== 'number' || !('changed' in outcome)) throw new Error(`Firefox did not return an option index for ${JSON.stringify(selector)}`);
+    const selected = await this.#withElement(context, selector, 'element => element.selectedIndex');
+    if (selected !== outcome.index) throw new InputVerificationError(`Option was set and change fired, but ${JSON.stringify(selector)} now has selectedIndex ${JSON.stringify(selected)} instead of ${outcome.index}`);
+    return { selectedIndex: outcome.index, changed: outcome.changed === true };
   }
 
   async scrollIntoView(context: string, selector: string): Promise<void> {
@@ -653,7 +723,7 @@ export class ZenBrowser {
       return !hit || (hit !== element && !element.contains(hit));
     }`);
     if (useLabel === true) {
-      const observed = await this.#withElement(context, selector, `element => {
+      await this.#withElement(context, selector, `element => {
         const label = element.labels?.[0] || element.closest('label');
         if (!label) throw new Error('Hidden checkable input has no associated visible label');
         label.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
@@ -662,31 +732,36 @@ export class ZenBrowser {
         const hit = document.elementFromPoint(Math.round(rect.left + rect.width / 2), Math.round(rect.top + rect.height / 2));
         if (!hit || (hit !== label && !label.contains(hit) && !hit.contains(label))) throw new Error('Associated label is covered by another element');
         label.click();
-        return element.checked;
       }`);
-      if (observed !== checked) throw new Error(`Check state did not update for ${JSON.stringify(selector)}`);
-      return;
-    }
-    await this.click(context, selector);
-    const observed = await this.#withElement(context, selector, 'element => element.checked');
-    if (observed !== checked) throw new Error(`Check state did not update for ${JSON.stringify(selector)}`);
+    } else await this.click(context, selector);
+    // Framework-controlled checkboxes may settle asynchronously (e.g. after an API call).
+    const deadline = Date.now() + CHECK_SETTLE_MS;
+    let observed: unknown;
+    do {
+      observed = await this.#withElement(context, selector, 'element => element.checked');
+      if (observed === checked) return;
+      await Bun.sleep(50);
+    } while (Date.now() < deadline);
+    throw new InputVerificationError(`The control was clicked, but ${JSON.stringify(selector)} still reads checked=${JSON.stringify(observed)} after ${CHECK_SETTLE_MS} ms`);
   }
 
+  // Runs constraint validation first: requestSubmit() silently does nothing on an invalid form.
   async submitForm(context: string, selector: string): Promise<void> {
-    const submitted = await this.#withElement(context, selector, `element => {
+    const outcome = await this.#withElement(context, selector, `element => {
       const form = element instanceof HTMLFormElement ? element : element.form || element.closest('form');
       if (!(form instanceof HTMLFormElement)) throw new Error('Submit target is not associated with a form');
-      if (typeof form.requestSubmit === 'function') {
-        const submitter = element instanceof HTMLButtonElement || element instanceof HTMLInputElement ? element : undefined;
-        form.requestSubmit(submitter);
-      } else {
-        const submitter = element instanceof HTMLElement ? element : form.querySelector('button[type=submit],input[type=submit]');
-        if (!(submitter instanceof HTMLElement)) throw new Error('Form has no usable submit control');
-        submitter.click();
+      const submitter = (element instanceof HTMLButtonElement && element.type === 'submit') || (element instanceof HTMLInputElement && ['submit', 'image'].includes(element.type)) ? element : null;
+      if (!form.noValidate && !submitter?.formNoValidate && !form.checkValidity()) {
+        return { submitted: false, invalidFields: [...form.elements].filter(field => field.willValidate && !field.validity.valid).map(field => ({
+          name: field.name || field.id || field.getAttribute('aria-label') || field.tagName.toLowerCase(),
+          validationMessage: field.validationMessage,
+        })) };
       }
-      return true;
+      form.requestSubmit(submitter);
+      return { submitted: true };
     }`);
-    if (submitted !== true) throw new Error(`Form submission did not start for ${JSON.stringify(selector)}`);
+    if (!outcome || typeof outcome !== 'object' || !('submitted' in outcome)) throw new Error(`Form submission did not start for ${JSON.stringify(selector)}`);
+    if (outcome.submitted !== true) throw new FormInvalidError('invalidFields' in outcome && Array.isArray(outcome.invalidFields) ? outcome.invalidFields as InvalidField[] : []);
   }
 
   async upload(context: string, selector: string, files: string[]): Promise<void> {
@@ -714,76 +789,6 @@ export class ZenBrowser {
     return { id: result.context, url, parent: null };
   }
 
-  async storageExport(userContext: string): Promise<unknown> {
-    await this.requireFeature('storage');
-    return await this.bidi.commandOptional('storage.getCookies', { partition: { type: 'storageKey', userContext } });
-  }
-
-
-  async resetEmulation(context: string): Promise<void> {
-    await this.requireFeature('emulation');
-    await this.bidi.commandOptional('emulation.setViewport', { context, viewport: null });
-  }
-
-  async resetPermission(context: string, name: string): Promise<void> {
-    await this.requireFeature('permissions');
-    await this.bidi.commandOptional('permissions.setPermission', { descriptor: { name }, state: 'prompt', origin: await this.url(context) });
-  }
-  async emulate(context: string, options: JsonObject): Promise<void> {
-    await this.requireFeature('emulation');
-    await this.bidi.commandOptional('emulation.setViewport', { context, ...options });
-  }
-
-  async setPermission(context: string, name: string, state: string): Promise<void> {
-    await this.requireFeature('permissions');
-    await this.bidi.commandOptional('permissions.setPermission', { descriptor: { name }, state, origin: await this.url(context) });
-  }
-
-  async addRoute(route: RouteDefinition): Promise<string> {
-    await this.requireFeature('networkInterception');
-    return await this.#routes.add(route);
-  }
-
-  async storageImport(userContext: string, cookies: unknown): Promise<void> {
-    await this.requireFeature('storage');
-    if (!Array.isArray(cookies)) throw new Error('State file contains malformed cookies');
-    for (const cookie of cookies) {
-      if (!cookie || typeof cookie !== 'object' || Array.isArray(cookie)) throw new Error('State file contains a malformed cookie');
-      await this.bidi.commandOptional('storage.setCookie', { cookie, partition: { type: 'storageKey', userContext } });
-    }
-  }
-
-  async removeRoute(intercept: string): Promise<void> {
-    await this.requireFeature('networkInterception');
-    await this.#routes.remove(intercept);
-  }
-
-  routes(): Array<{ intercept: string; route: RouteDefinition }> {
-    return this.#routes.list();
-  }
-
-  async accessibilityFindings(context: string): Promise<unknown> {
-    return await this.evaluateValue(context, `(() => {
-      const text = element => (element.innerText || element.textContent || '').trim().replace(/\\s+/g, ' ');
-      const role = element => element.getAttribute('role') || (element.matches('a[href]') ? 'link' : element.matches('button') ? 'button' : element.matches('input[type=checkbox]') ? 'checkbox' : null);
-      const name = element => element.getAttribute('aria-label') || text(element) || null;
-      const visible = element => element.getClientRects().length && getComputedStyle(element).visibility !== 'hidden';
-      const interactive = [...document.querySelectorAll('*')].filter(element => visible(element) && (role(element) || element.tabIndex >= 0 || element.matches('[onclick],[onpointerdown]')));
-      const findings = interactive.flatMap(element => {
-        const result = [];
-        const currentRole = role(element); const currentName = name(element);
-        if (currentRole && !currentName) result.push({ kind: 'unnamed-interactive-control', role: currentRole });
-        if ((element.disabled || element.getAttribute('aria-disabled') === 'true') && element.matches('[onclick],[onpointerdown]')) result.push({ kind: 'disabled-control-with-click-handler', role: currentRole, name: currentName });
-        if (!currentRole && element.tabIndex < 0 && getComputedStyle(element).cursor === 'pointer') result.push({ kind: 'visible-pointer-only-control', name: currentName });
-        return result;
-      });
-      const groups = new Map();
-      for (const element of interactive) { const landmark = element.closest('main,nav,aside,header,footer,[role]'); const key = [landmark?.tagName, landmark?.getAttribute('role'), role(element), name(element)].join('|'); groups.set(key, (groups.get(key) ?? 0) + 1); }
-      for (const [key, count] of groups) if (count > 1) findings.push({ kind: 'duplicate-role-name-in-landmark', key, count });
-      return findings;
-    })()`);
-  }
-
   async #withElement(context: string, selector: string, functionDeclaration: string): Promise<unknown> {
     const element = await this.#element(context, selector);
     const result = await this.bidi.command('script.callFunction', {
@@ -792,9 +797,11 @@ export class ZenBrowser {
       awaitPromise: true,
       arguments: [element],
     });
-    if (result.type === 'exception') throw new Error(`Element operation failed: ${JSON.stringify(result.exceptionDetails)}`);
-    const remote = result.result as JsonObject | undefined;
-    return remote?.value;
+    if (result.type === 'exception') {
+      const exception = result.exceptionDetails as JsonObject | undefined;
+      throw new Error(`Element operation failed: ${typeof exception?.text === 'string' ? exception.text : 'page exception'}`);
+    }
+    return deserializeRemoteValue(result.result as JsonObject | undefined);
   }
 
   async resolveLocator(context: string, locator: Locator): Promise<ResolvedLocator> {
@@ -926,10 +933,34 @@ function asContext(value: JsonObject): Context {
   };
 }
 
+function asPrompt(params: JsonObject): OpenPrompt {
+  return {
+    type: typeof params.type === 'string' ? params.type : 'unknown',
+    message: typeof params.message === 'string' ? params.message : '',
+    ...(typeof params.defaultValue === 'string' ? { defaultValue: params.defaultValue } : {}),
+  };
+}
+
+// The query string is ignored unless `expected` asks for one: SSO pages carry the destination host in `?service=…`.
+function urlMatches(href: string, expected: string): boolean {
+  if (expected.includes('?')) return href.includes(expected);
+  try {
+    const url = new URL(href);
+    url.search = '';
+    return url.href.includes(expected);
+  } catch {
+    return href.split('?')[0]!.includes(expected);
+  }
+}
+
 const EXPRESSION_PREVIEW_LENGTH = 240;
 const PAGE_SUMMARY_TEXT_LENGTH = 300;
 // In-page waits reject on their own timer; the transport deadline must outlast it so the page's error wins.
 const IN_PAGE_WAIT_MARGIN_MS = 5_000;
+// In-page source defining `documents()`: the top document plus every reachable same-origin (i)frame document, recursively.
+const SAME_ORIGIN_DOCUMENTS = `const documents = (doc = document, found = []) => { found.push(doc); for (const frame of doc.querySelectorAll('iframe,frame')) { try { if (frame.contentDocument) documents(frame.contentDocument, found); } catch {} } return found; };`;
+// How long `check` keeps reading the control back after input, for frameworks that update it asynchronously.
+const CHECK_SETTLE_MS = 1_000;
 
 // Returns the expression wrapped in an async arrow when it is a single expression, else undefined.
 // The Function constructor only parses the source here; the wrapper is never invoked in this process.
