@@ -24,6 +24,8 @@ test('dispatches client requests concurrently and routes responses to the issuin
     subscribe: async () => {},
     unsubscribe: async () => {},
     onEvent: (next) => { listener = next; return () => {}; },
+    onRawEvent: () => () => {},
+    onDisconnect: () => () => {},
     close: async () => {},
   };
   const broker = createBroker(upstream, 0);

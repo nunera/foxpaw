@@ -37,6 +37,11 @@ export class BidiClient {
   #sessionInfo?: JsonObject;
   #pending = new Map<number, Pending>();
   #listeners = new Set<(event: BidiEvent) => void>();
+  #rawListeners = new Set<(event: BidiEvent) => void>();
+  #disconnectListeners = new Set<(reason: Error) => void>();
+  // Subscription ids per events+contexts: unsubscribing removes only this client's own subscriptions, never a
+  // raw broker client's that happens to cover the same events (the old by-attributes form would).
+  #subscriptions = new Map<string, string[]>();
 
   constructor(readonly url: string, readonly timeoutMs = 15_000) {
     const endpoint = new URL(url);
@@ -97,12 +102,31 @@ export class BidiClient {
     this.#listeners.add(listener);
     return () => this.#listeners.delete(listener);
   }
+  /** Unredacted events, for raw WebDriver BiDi clients that need the real values (a submit guard reads URLs). */
+  onRawEvent(listener: (event: BidiEvent) => void): () => void {
+    this.#rawListeners.add(listener);
+    return () => this.#rawListeners.delete(listener);
+  }
+  /** Called when an established session's connection is lost or closed. */
+  onDisconnect(listener: (reason: Error) => void): () => void {
+    this.#disconnectListeners.add(listener);
+    return () => this.#disconnectListeners.delete(listener);
+  }
 
   async subscribe(events: string[], contexts?: string[]): Promise<void> {
-    await this.command('session.subscribe', { events, ...(contexts?.length ? { contexts } : {}) });
+    const result = await this.command('session.subscribe', { events, ...(contexts?.length ? { contexts } : {}) });
+    if (typeof result.subscription === 'string') {
+      const key = subscriptionKey(events, contexts);
+      this.#subscriptions.set(key, [...(this.#subscriptions.get(key) ?? []), result.subscription]);
+    }
   }
   async unsubscribe(events: string[], contexts?: string[]): Promise<void> {
-    await this.command('session.unsubscribe', { events, ...(contexts?.length ? { contexts } : {}) });
+    const key = subscriptionKey(events, contexts);
+    const ids = this.#subscriptions.get(key);
+    const id = ids?.pop();
+    if (ids && !ids.length) this.#subscriptions.delete(key);
+    if (id) await this.command('session.unsubscribe', { subscriptions: [id] });
+    else await this.command('session.unsubscribe', { events, ...(contexts?.length ? { contexts } : {}) });
   }
 
   async #request(method: string, params: JsonObject, timeoutMs = this.timeoutMs): Promise<JsonObject> {
@@ -131,6 +155,9 @@ export class BidiClient {
     if (typeof response.method === 'string') {
       const params = response.params;
       if (!params || typeof params !== 'object' || Array.isArray(params)) return;
+      const rawEvent = { method: response.method, params: params as JsonObject };
+      for (const listener of this.#rawListeners) listener(rawEvent);
+      if (!this.#listeners.size) return;
       const event = { method: response.method, params: redactEvent(response.method, params as JsonObject) };
       for (const listener of this.#listeners) listener(event);
       return;
@@ -145,10 +172,17 @@ export class BidiClient {
   }
 
   #disconnect(reason: Error): void {
+    const established = this.#sessionStarted;
     this.#sessionStarted = false; this.#socket = undefined;
     this.#sessionInfo = undefined;
+    this.#subscriptions.clear();               // they ended with the session
     for (const [id, pending] of this.#pending) { this.#pending.delete(id); clearTimeout(pending.timer); pending.reject(reason); }
+    if (established) for (const listener of this.#disconnectListeners) listener(reason);
   }
+}
+
+function subscriptionKey(events: string[], contexts?: string[]): string {
+  return JSON.stringify([[...events].sort(), [...(contexts ?? [])].sort()]);
 }
 
 export function redactEvent(_method: string, value: JsonObject): JsonObject { return redact(value) as JsonObject; }

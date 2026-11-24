@@ -48,10 +48,19 @@ Working in your own browser changes what a mistake costs. If the agent misreads 
 
 Firefox only allows one WebDriver BiDi session at a time, so a small broker holds it and every agent session talks to the broker. Requests run concurrently, and each response goes back to the session that sent it. The broker starts with the first tool call and exits when the last session disconnects.
 
+Programs that speak plain WebDriver BiDi can share the session too: they connect to `ws://127.0.0.1:9223/session` instead of Firefox's port. Each connection gets a session of its own. The broker answers `session.new` and `session.end` itself, and `session.status` reports that connection's view, so a client that checks its session was released still works. Everything else runs on the shared session, with these rules:
+
+- A client only receives events from its own subscriptions, and only for the tabs it named. Events from an iframe count as its tab.
+- A request held by a network intercept goes only to the client that added the intercept. A client that fails every held request it doesn't recognize (a submit guard does) would otherwise fail other clients' requests.
+- When a client ends its session or disconnects, the broker fails the requests it was still holding, then removes its intercepts, preload scripts and subscriptions. A held request is never let through on a departed client's behalf.
+
+The broker doesn't start on its own for these clients. Run `bun run broker`, or let a `zen_browser` call start it.
+
 | Path | What it is |
 | --- | --- |
 | `extension/zen-browser.ts` | The `zen_browser` tool for oh-my-pi |
 | `src/broker.ts` | The loopback broker that shares the BiDi session |
+| `src/mux.ts` | Plain WebDriver BiDi on `/session`: one virtual session per connection over the shared one |
 | `src/browser.ts` | `ZenBrowser`: tab targeting, keyboard and pointer input, dialogs, waits, screenshots |
 | `src/locator.ts` | CSS, role, and accessible-name locators; each must match exactly one element |
 | `src/cli.ts` | A CLI for one-off commands and debugging |

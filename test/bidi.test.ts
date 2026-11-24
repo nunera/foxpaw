@@ -123,3 +123,36 @@ test('redacts sensitive event payload values before listeners observe them', asy
     await expect(seen).resolves.toEqual({ authorization: '[REDACTED]', body: '[REDACTED]', promptText: '[REDACTED]', path: '[REDACTED]', url: 'https://x.test/?token=%5BREDACTED%5D' });
   } finally { await client.close(); server.stop(true); }
 });
+
+test('unsubscribes by its own subscription id, never by events another client on the session also uses', async () => {
+  const sent: Array<{ method: string; params: Record<string, unknown> }> = [];
+  let next = 0;
+  const server = Bun.serve({
+    port: 0,
+    fetch(request, webServer) {
+      if (webServer.upgrade(request)) return;
+      return new Response('WebSocket required', { status: 426 });
+    },
+    websocket: {
+      message(socket, raw) {
+        const request = JSON.parse(String(raw)) as { id: number; method: string; params: Record<string, unknown> };
+        sent.push(request);
+        const result = request.method === 'session.new' ? { sessionId: 's', capabilities: {} }
+          : request.method === 'session.subscribe' ? { subscription: `sub-${++next}` } : {};
+        socket.send(JSON.stringify({ id: request.id, result }));
+      },
+    },
+  });
+  const client = new BidiClient(`ws://127.0.0.1:${server.port}/session`);
+  try {
+    await client.subscribe(['network.beforeRequestSent'], ['tab']);
+    await client.subscribe(['network.beforeRequestSent'], ['tab']);
+    await client.unsubscribe(['network.beforeRequestSent'], ['tab']);
+    await client.unsubscribe(['network.beforeRequestSent'], ['tab']);
+    const unsubscribes = sent.filter((request) => request.method === 'session.unsubscribe').map((request) => request.params);
+    expect(unsubscribes).toEqual([{ subscriptions: ['sub-2'] }, { subscriptions: ['sub-1'] }]);
+  } finally {
+    await client.close();
+    server.stop(true);
+  }
+});
