@@ -31,25 +31,18 @@ jobs:
   npm:
     needs: binaries
     runs-on: ubuntu-latest
+    # Trusted publishing: npm trusts this workflow (nunera/foxpaw, release.yml) through GitHub's OIDC token.
+    # No npm token is stored anywhere; provenance is attached automatically.
     permissions:
       contents: read
       id-token: write
-    env:
-      NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
     steps:
-      - name: Skip without NPM_TOKEN
-        if: env.NODE_AUTH_TOKEN == ''
-        run: echo "::notice::NPM_TOKEN is not set; skipping npm publish"
-      - if: env.NODE_AUTH_TOKEN != ''
-        uses: actions/checkout@v7
-      - if: env.NODE_AUTH_TOKEN != ''
-        uses: oven-sh/setup-bun@v2
-      - if: env.NODE_AUTH_TOKEN != ''
-        uses: actions/setup-node@v7
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-node@v7
         with:
-          node-version: 22
-          registry-url: https://registry.npmjs.org
-      - if: env.NODE_AUTH_TOKEN != ''
-        run: bun install --frozen-lockfile
-      - if: env.NODE_AUTH_TOKEN != ''
-        run: npm publish --provenance --access public
+          node-version: 24
+      - name: npm 11.5.1+ (needed for trusted publishing)
+        run: npm install -g npm@latest
+      - run: bun install --frozen-lockfile
+      - run: npm publish --access public
