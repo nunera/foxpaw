@@ -1,10 +1,85 @@
+import { spawn, type ChildProcess } from 'node:child_process';
+import { mkdirSync, openSync } from 'node:fs';
+import { get } from 'node:http';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { firefoxBidiBrokerUrl } from './config.ts';
 import { BidiError, BidiFeatureUnavailableError, type BidiEvent, type JsonObject } from './bidi.ts';
+import { dataDir } from './launch.ts';
 
 export const BROKER_URL = firefoxBidiBrokerUrl();
-const brokerScript = fileURLToPath(new URL('./broker.ts', import.meta.url));
 type Pending = { resolve(value: JsonObject): void; reject(error: Error): void };
+
+// Inside a `bun build --compile` binary, modules live under /$bunfs (B:/~BUN on Windows).
+const COMPILED = import.meta.path.startsWith('/$bunfs/') || /^[A-Za-z]:[\\/]~BUN[\\/]/.test(import.meta.path);
+
+/** How this process starts the broker: the foxpaw binary itself, Bun, or the Bun embedded in a host such as omp. */
+export function brokerCommand(): { command: string[]; env: Record<string, string> } {
+  if (COMPILED) return { command: [process.execPath, 'broker'], env: {} };
+  const script = fileURLToPath(new URL('./broker.ts', import.meta.url));
+  const bun = Bun.which('bun');
+  // A host that embeds Bun (the omp binary) behaves as plain `bun` when BUN_BE_BUN=1 is set.
+  return bun ? { command: [bun, script], env: {} } : { command: [process.execPath, script], env: { BUN_BE_BUN: '1' } };
+}
+
+type Health = 'broker' | 'down' | 'other';
+/** node:http rather than fetch: it never routes loopback through an HTTP(S)_PROXY from the environment. */
+function health(url: string): Promise<Health> {
+  const { promise, resolve } = Promise.withResolvers<Health>();
+  const endpoint = new URL(url);
+  const request = get({ host: endpoint.hostname, port: endpoint.port || 80, path: '/health', timeout: 1000 }, (response) => {
+    let body = '';
+    response.setEncoding('utf8');
+    response.on('data', (chunk: string) => { body += chunk; });
+    response.on('end', () => {
+      if (response.statusCode === 503) resolve('down');                     // shutting down: start a new one
+      else if (response.statusCode === 200 && body.includes('"foxpaw":"broker"')) resolve('broker');
+      // Brokers from before /health answer every plain request with 426 and this text.
+      else if (response.statusCode === 426 && body.includes('Firefox BiDi broker')) resolve('broker');
+      else resolve('other');
+    });
+  });
+  request.on('timeout', () => request.destroy());
+  request.on('error', () => resolve('down'));
+  return promise;
+}
+
+/**
+ * Make sure a foxpaw broker answers at `url`, starting one in the background if needed, and return `url`.
+ * The broker exits once its last client leaves (or a minute after starting if none connects), so connect soon after.
+ */
+export async function ensureBroker(url: string = BROKER_URL, timeoutMs = 10_000): Promise<string> {
+  const deadline = Date.now() + timeoutMs;
+  let child: ChildProcess | undefined;
+  let running = false;
+  for (;;) {
+    const state = await health(url);
+    if (state === 'broker') return url;
+    if (state === 'other') throw new Error(`Something other than the foxpaw broker answers at ${url}. Set FIREFOX_BIDI_BROKER_URL to a free port.`);
+    if (Date.now() > deadline) throw new Error(`The foxpaw broker did not start at ${url}; see ${join(dataDir(), 'broker.log')}`);
+    // One broker at a time; a new one only after the last exited (it loses the port race to a broker still closing).
+    if (!running) {
+      child = spawnBroker(url);
+      running = true;
+      child.once('exit', () => { running = false; });
+      child.once('error', () => { running = false; });
+    }
+    await Bun.sleep(50);
+  }
+}
+
+function spawnBroker(url: string): ChildProcess {
+  const { command, env } = brokerCommand();
+  mkdirSync(dataDir(), { recursive: true });
+  const log = openSync(join(dataDir(), 'broker.log'), 'a');
+  const child = spawn(command[0]!, command.slice(1), {
+    detached: true,
+    stdio: ['ignore', log, log],
+    env: { ...process.env, ...env, FIREFOX_BIDI_BROKER_PORT: new URL(url).port || '9223' },
+  });
+  child.unref();
+  return child;
+}
 
 export class BrokerBidiClient {
   #socket?: WebSocket;
@@ -33,20 +108,23 @@ export class BrokerBidiClient {
 
   async #connect(): Promise<WebSocket> {
     if (this.#socket?.readyState === WebSocket.OPEN) return this.#socket;
-    for (let attempt = 0; attempt < 21; attempt++) {
+    const deadline = Date.now() + this.timeoutMs;
+    for (;;) {
+      await ensureBroker(this.url, Math.max(1_000, deadline - Date.now()));
       const socket = new WebSocket(this.url);
       this.#socket = socket;
       socket.addEventListener('message', (message) => this.#receive(message.data));
       socket.addEventListener('close', () => { if (this.#socket === socket) this.#socket = undefined; });
       const deferred = Promise.withResolvers<void>();
-      const timer = setTimeout(() => deferred.reject(new Error(`Timed out connecting to Firefox broker at ${this.url}`)), Math.min(this.timeoutMs, 500));
+      const timer = setTimeout(() => deferred.reject(new Error(`Timed out connecting to Firefox broker at ${this.url}`)), 2_000);
       socket.addEventListener('open', () => { clearTimeout(timer); deferred.resolve(); }, { once: true });
       socket.addEventListener('error', () => { clearTimeout(timer); deferred.reject(new Error(`Unable to connect to Firefox broker at ${this.url}`)); }, { once: true });
-      try { await deferred.promise; return socket; } catch { socket.close(); }
-      if (attempt === 0) Bun.spawn([Bun.which('bun') ?? process.execPath, brokerScript], { stdout: 'ignore', stderr: 'ignore', stdin: 'ignore', env: { ...process.env, FIREFOX_BIDI_BROKER_PORT: new URL(this.url).port || '9223' } });
-      await Bun.sleep(25);
+      try { await deferred.promise; return socket; } catch (error) {
+        socket.close();
+        // The broker began shutting down between its health check and this connection: check (and start) again.
+        if (Date.now() > deadline) throw error;
+      }
     }
-    throw new Error(`Unable to start Firefox broker at ${this.url}`);
   }
 
   async #request(kind: string, payload: JsonObject, timeoutMs = this.timeoutMs): Promise<JsonObject> {

@@ -173,8 +173,17 @@ export class ZenBrowser {
     return matches[0]!;
   }
 
+  /**
+   * Selects the tab. Firefox also waits for the window to take keyboard focus, which Wayland compositors refuse to a
+   * window the user isn't looking at (it is marked urgent instead), so that wait never ends there. The tab is selected
+   * either way; past a short cap the wait is dropped.
+   */
   async activate(context: string): Promise<void> {
-    await this.bidi.command('browsingContext.activate', { context });
+    try {
+      await this.bidi.command('browsingContext.activate', { context }, ACTIVATE_WAIT_MS);
+    } catch (error) {
+      if (!(error instanceof Error && error.message.includes('Timed out waiting'))) throw error;
+    }
   }
 
   async open(url = 'about:blank', referenceContext?: string): Promise<Context> {
@@ -184,12 +193,14 @@ export class ZenBrowser {
   }
 
   async openWithOutcome(url = 'about:blank', referenceContext?: string): Promise<OpenResult> {
+    // Created in the background, then selected: `background: false` has the same never-ending focus wait as activate.
     const result = await this.bidi.command('browsingContext.create', {
       type: 'tab',
-      background: false,
+      background: true,
       ...(referenceContext ? { referenceContext } : {}),
     });
     if (typeof result.context !== 'string') throw new Error('Firefox did not return a browsing-context ID');
+    await this.activate(result.context);
     const context: Context = { id: result.context, url: 'about:blank', parent: null };
     if (url === 'about:blank') return { context, created: true, navigationStarted: false };
     try {
@@ -783,8 +794,9 @@ export class ZenBrowser {
 
   async openInUserContext(url: string, referenceContext: string, userContext: string): Promise<Context> {
     await this.requireFeature('browserUserContexts');
-    const result = await this.bidi.commandOptional('browsingContext.create', { type: 'tab', background: false, referenceContext, userContext });
+    const result = await this.bidi.commandOptional('browsingContext.create', { type: 'tab', background: true, referenceContext, userContext });
     if (typeof result.context !== 'string') throw new Error('Firefox did not return a browsing-context ID');
+    await this.activate(result.context);
     await this.navigate(result.context, url);
     return { id: result.context, url, parent: null };
   }
@@ -961,6 +973,8 @@ const IN_PAGE_WAIT_MARGIN_MS = 5_000;
 const SAME_ORIGIN_DOCUMENTS = `const documents = (doc = document, found = []) => { found.push(doc); for (const frame of doc.querySelectorAll('iframe,frame')) { try { if (frame.contentDocument) documents(frame.contentDocument, found); } catch {} } return found; };`;
 // How long `check` keeps reading the control back after input, for frameworks that update it asynchronously.
 const CHECK_SETTLE_MS = 1_000;
+// How long a tab activation may wait for its window to take focus (see `activate`); focused windows answer at once.
+const ACTIVATE_WAIT_MS = 1_500;
 
 // Returns the expression wrapped in an async arrow when it is a single expression, else undefined.
 // The Function constructor only parses the source here; the wrapper is never invoked in this process.

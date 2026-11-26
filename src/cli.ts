@@ -1,105 +1,153 @@
+#!/usr/bin/env bun
+import { existsSync } from 'node:fs';
 import { writeFile } from 'node:fs/promises';
-import { firefoxBidiUrl } from './config.ts';
-import { BidiClient } from './bidi.ts';
+import { join } from 'node:path';
+import { brokerSessionUrl, firefoxBidiBrokerUrl, firefoxBidiUrl } from './config.ts';
+import { BrokerBidiClient, ensureBroker } from './broker-client.ts';
 import { ZenBrowser } from './browser.ts';
+import { AUTOCONFIG, browserAppDir, defaultProfileDir, findBrowser, installAutoconfig, isListening, launchBrowser, profileLockOwner, type LaunchOptions } from './launch.ts';
+import { runBroker } from './broker.ts';
 
 const [command, ...args] = process.argv.slice(2);
-const endpoint = firefoxBidiUrl();
-const browser = new ZenBrowser(new BidiClient(endpoint));
 
 try {
   switch (command) {
-    case 'tabs':
-      console.log(JSON.stringify(await browser.contexts(), null, 2));
+    case 'launch':
+      print(await launchBrowser(launchOptions(args)));
       break;
-    case 'open':
-      requireArgs('open <url>', args, 1);
-      console.log(JSON.stringify(await browser.open(args[0]!)));
-      break;
-    case 'navigate':
-      requireArgs('navigate <target> <url>', args, 2);
-      await browser.navigate((await browser.target(args[0]!)).id, args[1]!);
-      break;
-    case 'activate':
-      requireArgs('activate <target>', args, 1);
-      await browser.activate((await browser.target(args[0]!)).id);
-      break;
-    case 'close':
-      requireArgs('close <target>', args, 1);
-      await browser.close((await browser.target(args[0]!)).id);
-      break;
-    case 'click':
-      requireArgs('click <target> <selector>', args, 2);
-      await browser.click((await browser.target(args[0]!)).id, args[1]!);
-      break;
-    case 'fill':
-      requireArgs('fill <target> <selector> <value>', args, 3);
-      await browser.fill((await browser.target(args[0]!)).id, args[1]!, args[2]!);
-      break;
-    case 'type':
-      requireArgs('type <target> <selector> <text>', args, 3);
-      await browser.type((await browser.target(args[0]!)).id, args[1]!, args[2]!);
-      break;
-    case 'press':
-      requireArgs('press <target> <key> [selector]', args, 2);
-      await browser.press((await browser.target(args[0]!)).id, args[1]!, args[2]);
-      break;
-    case 'scroll': {
-      requireArgs('scroll <target> <dx> <dy>', args, 3);
-      const dx = Number(args[1]);
-      const dy = Number(args[2]);
-      if (!Number.isFinite(dx) || !Number.isFinite(dy)) throw new Error('Scroll deltas must be finite numbers');
-      await browser.scroll((await browser.target(args[0]!)).id, dx, dy);
+    case 'ensure': {
+      if (args.includes('--launch')) await launchBrowser(launchOptions(args.filter((arg) => arg !== '--launch')));
+      await ensureBroker(firefoxBidiBrokerUrl());
+      console.log(brokerSessionUrl());
       break;
     }
-    case 'select':
-      requireArgs('select <target> <selector> <value>', args, 3);
-      await browser.select((await browser.target(args[0]!)).id, args[1]!, args[2]!);
+    case 'broker':
+      runBroker();
       break;
-    case 'check':
-      requireArgs('check <target> <selector> <true|false>', args, 3);
-      await browser.check((await browser.target(args[0]!)).id, args[1]!, args[2] === 'true');
+    case 'status':
+      print(await status());
       break;
-    case 'upload':
-      requireArgs('upload <target> <selector> <file...>', args, 3);
-      await browser.upload((await browser.target(args[0]!)).id, args[1]!, args.slice(2));
+    case 'autoconfig':
+      autoconfig(args);
       break;
-    case 'wait-for':
-      requireArgs('wait-for <target> <selector>', args, 2);
-      await browser.waitFor((await browser.target(args[0]!)).id, args[1]!);
+    case undefined: case 'help': case '--help': case '-h':
+      console.log(usage());
       break;
-    case 'wait-url':
-      requireArgs('wait-url <target> <url-fragment>', args, 2);
-      await browser.waitForUrl((await browser.target(args[0]!)).id, args[1]!);
-      break;
-    case 'evaluate':
-      requireArgs('evaluate <target> <expression>', args, 2);
-      console.log(JSON.stringify(await browser.evaluate((await browser.target(args[0]!)).id, args[1]!), null, 2));
-      break;
-    case 'screenshot': {
-      requireArgs('screenshot <target> <output.png>', args, 2);
-      const base64 = await browser.screenshot((await browser.target(args[0]!)).id);
-      await writeFile(args[1]!, Buffer.from(base64, 'base64'));
-      break;
-    }
     default:
-      console.error(usage());
-      process.exitCode = 2;
+      await page(command, args);
   }
-} finally {
-  await browser.bidi.close();
+} catch (error) {
+  console.error(`foxpaw: ${error instanceof Error ? error.message : String(error)}`);
+  process.exitCode = 1;
 }
 
-function requireArgs(syntax: string, received: string[], count: number): void {
-  if (received.length < count) throw new Error(`Usage: zen-bidi ${syntax}`);
+function launchOptions(flags: string[]): LaunchOptions {
+  const options: LaunchOptions = {};
+  for (let index = 0; index < flags.length; index++) {
+    const flag = flags[index];
+    const value = () => { const next = flags[++index]; if (!next) throw new Error(`${flag} needs a value`); return next; };
+    if (flag === '--dynamic') options.mode = 'dynamic';
+    else if (flag === '--headless') options.headless = true;
+    else if (flag === '--browser') options.browser = value();
+    else if (flag === '--profile') options.profile = value();
+    else throw new Error(`Unknown option ${flag}\n\n${usage()}`);
+  }
+  return options;
 }
+
+async function status() {
+  const bidi = new URL(firefoxBidiUrl());
+  const broker = new URL(firefoxBidiBrokerUrl());
+  const browser = findBrowser();
+  const profile = process.env.FIREFOX_BIDI_PROFILE ?? defaultProfileDir();
+  const appDir = browser ? browserAppDir(browser) : undefined;
+  return {
+    browser: browser ?? null,
+    // null: the executable is a wrapper (Nix, Flatpak) whose install directory can't be found from here.
+    autoconfigInstalled: appDir ? existsSync(join(appDir, 'foxpaw.cfg')) : null,
+    profile,
+    profileOpenBy: profileLockOwner(profile) ?? null,
+    remoteControl: { url: bidi.toString(), listening: await isListening(Number(bidi.port || 9222)) },
+    broker: { url: brokerSessionUrl(), listening: await isListening(Number(broker.port || 9223)) },
+  };
+}
+
+function autoconfig(rest: string[]): void {
+  const [sub, dir] = rest;
+  if (sub === 'print') { process.stdout.write(AUTOCONFIG.cfg); return; }
+  if (sub !== 'install') throw new Error('Usage: foxpaw autoconfig install [browser-install-dir] | foxpaw autoconfig print');
+  const browser = findBrowser();
+  const appDir = dir ?? (browser ? browserAppDir(browser) : undefined);
+  if (!appDir) throw new Error(`Can't find the install directory (the one with omni.ja) of ${browser ?? 'any browser'}; pass it. On Nix, use the flake's lib.withRemoteControl instead (see README).`);
+  for (const file of installAutoconfig(appDir)) console.log(file);
+}
+
+async function page(name: string, rest: string[]): Promise<void> {
+  // Through the broker, so the CLI shares the browser's one session with agents and programs instead of competing.
+  const browser = new ZenBrowser(new BrokerBidiClient());
+  const target = async () => (await browser.target(rest[0]!)).id;
+  try {
+    switch (name) {
+      case 'tabs': print(await browser.contexts()); break;
+      case 'open': need('open <url>', 1); print(await browser.open(rest[0]!)); break;
+      case 'navigate': need('navigate <target> <url>', 2); await browser.navigate(await target(), rest[1]!); break;
+      case 'activate': need('activate <target>', 1); await browser.activate(await target()); break;
+      case 'close': need('close <target>', 1); await browser.close(await target()); break;
+      case 'click': need('click <target> <selector>', 2); await browser.click(await target(), rest[1]!); break;
+      case 'fill': need('fill <target> <selector> <value>', 3); await browser.fill(await target(), rest[1]!, rest[2]!); break;
+      case 'type': need('type <target> <selector> <text>', 3); await browser.type(await target(), rest[1]!, rest[2]!); break;
+      case 'press': need('press <target> <key> [selector]', 2); await browser.press(await target(), rest[1]!, rest[2]); break;
+      case 'scroll': {
+        need('scroll <target> <dx> <dy>', 3);
+        const dx = Number(rest[1]);
+        const dy = Number(rest[2]);
+        if (!Number.isFinite(dx) || !Number.isFinite(dy)) throw new Error('Scroll deltas must be finite numbers');
+        await browser.scroll(await target(), dx, dy);
+        break;
+      }
+      case 'select': need('select <target> <selector> <value>', 3); await browser.select(await target(), rest[1]!, rest[2]!); break;
+      case 'check': need('check <target> <selector> <true|false>', 3); await browser.check(await target(), rest[1]!, rest[2] === 'true'); break;
+      case 'upload': need('upload <target> <selector> <file...>', 3); await browser.upload(await target(), rest[1]!, rest.slice(2)); break;
+      case 'wait-for': need('wait-for <target> <selector>', 2); await browser.waitFor(await target(), rest[1]!); break;
+      case 'wait-url': need('wait-url <target> <url-fragment>', 2); await browser.waitForUrl(await target(), rest[1]!); break;
+      case 'evaluate': need('evaluate <target> <expression>', 2); print(await browser.evaluate(await target(), rest[1]!)); break;
+      case 'screenshot': {
+        need('screenshot <target> <output.png>', 2);
+        await writeFile(rest[1]!, Buffer.from(await browser.screenshot(await target()), 'base64'));
+        break;
+      }
+      default:
+        console.error(usage());
+        process.exitCode = 2;
+    }
+  } finally {
+    await browser.bidi.close();
+  }
+
+  function need(syntax: string, count: number): void {
+    if (rest.length < count) throw new Error(`Usage: foxpaw ${syntax}`);
+  }
+}
+
+function print(value: unknown): void { console.log(JSON.stringify(value, null, 2)); }
 
 function usage(): string {
-  return `Usage: bun run start -- <command>
+  return `Usage: foxpaw <command>
 
-Targets are unique URL or title substrings, resolved inside the active BiDi session.
+Setup:
+  launch [--dynamic] [--headless] [--browser PATH] [--profile DIR]
+                      Start a Zen or Firefox foxpaw can drive, next to your everyday browser.
+                      Default profile: ${defaultProfileDir()}. --dynamic starts remote control
+                      from inside the browser (needs the AutoConfig), so pages don't see navigator.webdriver.
+  ensure [--launch ...]
+                      Start the broker if needed and print its plain WebDriver BiDi URL
+                      (${brokerSessionUrl()}). --launch also starts the browser (takes launch's options).
+  broker              Run the broker in the foreground.
+  status              Show the browser, profile, remote-control port, and broker.
+  autoconfig install [dir] | autoconfig print
+                      Copy the AutoConfig that --dynamic needs into the browser's install directory.
 
-Commands:
+Pages (targets are unique URL or title substrings; runs through the broker):
   tabs
   open <url>
   activate <target>

@@ -29,6 +29,14 @@ export class BidiFeatureUnavailableError extends BidiError {
 
 const unsupportedErrors = new Set(['unknown command', 'unsupported operation', 'unsupported command']);
 
+/** Nothing accepted a WebSocket connection at the Remote Agent endpoint: no browser with remote control is running. */
+export class BrowserUnavailableError extends Error {
+  constructor(readonly url: string) {
+    super(`No browser is listening for WebDriver BiDi at ${url}. Start one with \`foxpaw launch\` (the zen_browser tool: action "launch"): its own profile, next to your everyday browser. To use your everyday profile instead, quit the browser, then start it with --remote-debugging-port=${new URL(url).port || '9222'}; starting it with the flag while it is still open only opens a window and ignores the flag.`);
+    this.name = 'BrowserUnavailableError';
+  }
+}
+
 export class BidiClient {
   #socket?: WebSocket;
   #connecting?: Promise<void>;
@@ -65,7 +73,7 @@ export class BidiClient {
       const opened = Promise.withResolvers<void>();
       const timer = setTimeout(() => opened.reject(new Error(`Timed out connecting to ${this.url}`)), this.timeoutMs);
       socket.addEventListener('open', () => { clearTimeout(timer); opened.resolve(); }, { once: true });
-      socket.addEventListener('error', () => { clearTimeout(timer); opened.reject(new Error(`Unable to connect to ${this.url}`)); }, { once: true });
+      socket.addEventListener('error', () => { clearTimeout(timer); opened.reject(new BrowserUnavailableError(this.url)); }, { once: true });
       await opened.promise;
       // `ignore` keeps Firefox from auto-accepting or auto-dismissing every alert/confirm/prompt/beforeunload
       // in the user's real tabs while this session exists; the relay reports open prompts instead.

@@ -1,20 +1,33 @@
 {
   "name": "foxpaw",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "An oh-my-pi tool that lets an AI agent use the Zen or Firefox you already have open, signed in, over WebDriver BiDi.",
   "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/nunera/foxpaw.git"
   },
-  "private": true,
   "type": "module",
+  "bin": {
+    "foxpaw": "src/cli.ts"
+  },
+  "exports": {
+    ".": "./src/index.ts",
+    "./extension": "./extension/zen-browser.ts"
+  },
+  "files": ["src", "extension", "autoconfig"],
+  "omp": {
+    "extensions": ["extension/zen-browser.ts"]
+  },
+  "engines": {
+    "bun": ">=1.1"
+  },
   "scripts": {
     "check": "bunx tsc --noEmit",
     "test": "bun test",
     "start": "bun run src/cli.ts",
-    "broker": "bun run src/broker.ts",
-    "install-extension": "ln -sfn \"$PWD/extension/zen-browser.ts\" \"$HOME/.omp/agent/extensions/zen-browser.ts\""
+    "broker": "bun run src/cli.ts broker",
+    "build": "bun build --compile src/cli.ts --outfile dist/foxpaw"
   },
   "devDependencies": {
     "@types/bun": "latest",

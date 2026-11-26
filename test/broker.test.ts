@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test';
 import { createBroker, type BrokerUpstream } from '../src/broker.ts';
-import type { BidiEvent, JsonObject } from '../src/bidi.ts';
+import { BrowserUnavailableError, type BidiEvent, type JsonObject } from '../src/bidi.ts';
 
 function connect(port: number): Promise<{ socket: WebSocket; messages: Array<Record<string, unknown>> }> {
   const socket = new WebSocket(`ws://127.0.0.1:${port}`);
@@ -50,6 +50,54 @@ test('dispatches client requests concurrently and routes responses to the issuin
     await until(() => a.messages.length === 2 && b.messages.length === 2);
     expect(a.messages[1]).toMatchObject({ kind: 'event', method: 'browsingContext.load' });
     a.socket.close(); b.socket.close();
+  } finally {
+    await broker.shutdown();
+  }
+});
+
+const upstreamWith = (overrides: Partial<BrokerUpstream>): BrokerUpstream => ({
+  sessionInfo: async () => ({}),
+  command: async () => ({}),
+  commandOptional: async () => ({}),
+  subscribe: async () => {},
+  unsubscribe: async () => {},
+  onEvent: () => () => {},
+  onRawEvent: () => () => {},
+  onDisconnect: () => () => {},
+  close: async () => {},
+  ...overrides,
+});
+
+test('refuses new connections once it starts shutting down, so clients start a fresh broker', async () => {
+  const closing = Promise.withResolvers<void>();
+  const closeCalled = Promise.withResolvers<void>();
+  const broker = createBroker(upstreamWith({ close: () => { closeCalled.resolve(); return closing.promise; } }), 0);
+  const port = broker.server.port as number;
+  expect(await (await fetch(`http://127.0.0.1:${port}/health`)).json()).toEqual({ foxpaw: 'broker' });
+  const client = await connect(port);
+  client.socket.close();
+  await closeCalled.promise;                    // the last client left: the idle shutdown is ending the session
+  expect((await fetch(`http://127.0.0.1:${port}/health`)).status).toBe(503);
+  await expect(connect(port)).rejects.toThrow('connect failed');
+  closing.resolve();
+});
+
+test('launches a browser once when none is listening, then retries the session', async () => {
+  let launches = 0;
+  let available = false;
+  const launch = async () => { launches++; available = true; };
+  const broker = createBroker(upstreamWith({
+    sessionInfo: async () => { if (!available) throw new BrowserUnavailableError('ws://127.0.0.1:9/session'); return { capabilities: { browserName: 'firefox' } }; },
+  }), 0, { launch });
+  try {
+    const port = broker.server.port as number;
+    const a = await connect(port);
+    a.socket.send(JSON.stringify({ id: 1, kind: 'sessionInfo' }));
+    a.socket.send(JSON.stringify({ id: 2, kind: 'sessionInfo' }));
+    await until(() => a.messages.length === 2);
+    expect(a.messages.map((message) => message.result)).toEqual([{ capabilities: { browserName: 'firefox' } }, { capabilities: { browserName: 'firefox' } }]);
+    expect(launches).toBe(1);
+    a.socket.close();
   } finally {
     await broker.shutdown();
   }

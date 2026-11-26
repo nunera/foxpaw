@@ -4,13 +4,14 @@ import { ZenBrowser, ZenEmptyTabContextFilter, PageEvaluationError, InputVerific
 import { ActionScope, type ActionScopeResult, type WaitCondition, type WaitPredicate } from '../src/action-scope.ts';
 import { documentFrame, formSchema, queryElements, semanticSnapshot, type ElementIdentity, type FrameRef, type Locator, type ResolvedLocator } from '../src/locator.ts';
 import { summarizeDiagnostic } from '../src/diagnostics.ts';
+import { launchBrowser } from '../src/launch.ts';
 
 const ACTIONS = [
   'tabs', 'inspect', 'form_schema', 'field_state', 'query', 'table', 'events', 'wait_event',
   'open', 'activate', 'close', 'navigate', 'reload', 'history', 'click', 'double_click', 'right_click',
   'hover', 'drag', 'pointer', 'fill', 'fill_many', 'type', 'press', 'scroll', 'select', 'select_many',
   'check', 'check_many', 'assert', 'assert_many', 'batch', 'submit_form', 'upload', 'wait_for',
-  'wait_for_change', 'wait_url', 'evaluate', 'dialog', 'screenshot',
+  'wait_for_change', 'wait_url', 'evaluate', 'dialog', 'screenshot', 'launch',
 ] as const;
 type Action = typeof ACTIONS[number];
 // Only reading and waiting may fall back to the one focused tab. Anything that can change a page must name its tab,
@@ -326,6 +327,8 @@ export default function registerZenBrowser(pi: ExtensionAPI) {
       '',
       'Targeting: call `tabs` first and pass its `tabId` on every call. Actions that can change a page (click, fill, navigate, close, …) require `tabId` or a `target` matching one tab; they never act on whichever tab is focused. Prefer element `handle`s from `inspect`; `selector`, `role`, `name`, and `locator` narrow one element together and must match exactly one.',
       '',
+      'No browser: if a call fails with "No browser is listening", `launch` starts one for foxpaw in its own profile, next to the user\'s everyday browser (the user signs in there once). Do not tell the user to restart their everyday browser unless they ask to use that profile.',
+      '',
       'Dialogs: if a response contains `openPrompt` ({type, message}), the page opened an alert/confirm/prompt/beforeunload dialog (e.g. "Are you sure?") and is blocked. The action did run; do not repeat it. Call `dialog` with `dialogAction: "accept"` or `"dismiss"` (and `promptText` for a prompt) next; other actions on that tab are refused until then.',
       '',
       'Verification: fill/type/select/check read the control back. `verified: false` with `verifyError` means the input WAS sent but the value differs: do not resend; inspect the field. `submit_form` checks form validity first and, if invalid, fails with `submitted: false` and `invalidFields`.',
@@ -379,6 +382,13 @@ export default function registerZenBrowser(pi: ExtensionAPI) {
     async execute(_id, params, signal) {
       return await serialize(async () => {
         if (signal?.aborted) throw new Error('Firefox browser action aborted');
+        if (params.action === 'launch') {
+          const launched = await launchBrowser();
+          const details = launched.started
+            ? { ...launched, note: 'Started a browser for foxpaw in its own profile, next to the user\'s everyday browser. The user signs in there once; logins persist. Call tabs next.' }
+            : { ...launched, note: 'A browser is already listening for remote control; nothing was started. Call tabs next.' };
+          return { content: [{ type: 'text', text: JSON.stringify(details) }], details };
+        }
         await browser.watchPrompts();
         const timeout = params.timeoutMs ?? 10_000;
         let details: Record<string, unknown>;

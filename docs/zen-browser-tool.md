@@ -48,10 +48,11 @@ Dialogs are tracked from the first tool call of the session; one that was alread
 
 | Action | Notes |
 | --- | --- |
-| `open` | Requires `url`. The new tab opens in the foreground next to the reference tab (`tabId` or `target`), in the same window. With no visible tab, omit the reference. `isolation: "test"` opens it in a new disposable user context (container) with its own cookies. |
+| `launch` | Starts a browser for foxpaw when none listens for remote control: a separate process with foxpaw's own profile, next to the user's everyday browser (see the README, "Start a browser"). Takes no tab. Returns `started: false` when one is already running. Every other action fails with "No browser is listening" until one is. |
+| `open` | Requires `url`. The new tab opens next to the reference tab (`tabId` or `target`), in the same window, and is selected. With no visible tab, omit the reference. `isolation: "test"` opens it in a new disposable user context (container) with its own cookies. |
 | `navigate`, `reload` | `reload` reloads the current document, including URLs with a `#fragment`. |
 | `history` | `dx` is the traversal delta, e.g. `-1` for back. |
-| `activate`, `close` | Closing the last tab of a test context also removes the context. Test contexts still open when the omp session ends are removed then. |
+| `activate`, `close` | `activate` selects the tab; it doesn't wait for the window to take keyboard focus, which Wayland compositors refuse to a window the user isn't looking at. Closing the last tab of a test context also removes the context. Test contexts still open when the omp session ends are removed then. |
 | `dialog` | `dialogAction` is `accept` or `dismiss`; `promptText` fills a prompt. Returns the handled `prompt`. It doesn't wait for anything the dialog triggers; follow with a wait action. |
 
 ### Input

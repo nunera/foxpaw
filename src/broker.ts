@@ -1,9 +1,19 @@
-import { firefoxBidiUrl } from './config.ts';
-import { BidiClient, BidiError, BidiFeatureUnavailableError, type BidiEvent, type JsonObject } from './bidi.ts';
+import { firefoxBidiBrokerUrl, firefoxBidiUrl } from './config.ts';
+import { BidiClient, BidiError, BidiFeatureUnavailableError, BrowserUnavailableError, type BidiEvent, type JsonObject } from './bidi.ts';
+import { launchBrowser } from './launch.ts';
 import { RawMux, type RawClient } from './mux.ts';
 
 export type BrokerUpstream = Pick<BidiClient, 'command' | 'commandOptional' | 'sessionInfo' | 'subscribe' | 'unsubscribe' | 'onEvent' | 'onRawEvent' | 'onDisconnect' | 'close'>;
+export type BrokerOptions = {
+  /** Starts a browser when none is listening; the session is then retried once. */
+  launch?: () => Promise<unknown>;
+  /** Exit when no client has connected this long after start (a broker spawned for a client that never came). */
+  startupGraceMs?: number;
+};
 type SocketData = { raw: boolean; client?: RawClient };
+
+/** Body of `GET /health`; `foxpaw ensure` checks it to tell the broker from some other program on the port. */
+export const BROKER_HEALTH = { foxpaw: 'broker' } as const;
 
 /**
  * Requests from all clients are dispatched concurrently: BidiClient matches responses to requests by id, so a slow
@@ -12,16 +22,30 @@ type SocketData = { raw: boolean; client?: RawClient };
  *
  * Two protocols share the one Firefox session: foxpaw's own envelope (`{id, kind, ...}`) on `/`, and plain
  * WebDriver BiDi on `/session` for clients that speak it themselves (see mux.ts).
+ *
+ * Once the last client leaves, the broker ends the Firefox session and exits. From that moment it refuses new
+ * connections and health checks (503), so a client never lands on a broker that is about to stop: it starts a new one.
  */
-export function createBroker(bidi: BrokerUpstream, port: number) {
+export function createBroker(bidi: BrokerUpstream, port: number, options: BrokerOptions = {}) {
   const clients = new Set<{ send(data: string): unknown }>();
   const raw = new Map<RawClient, { close(code?: number, reason?: string): unknown }>();
-  const mux = new RawMux(bidi);
   let idleTimer: Timer | undefined;
+  let closing = false;
   let session: Promise<unknown> = Promise.resolve();
+  let launching: Promise<unknown> | undefined;
 
+  const sessionInfo = async (): Promise<JsonObject> => {
+    try {
+      return await bidi.sessionInfo();
+    } catch (error) {
+      if (!(error instanceof BrowserUnavailableError) || !options.launch) throw error;
+      await (launching ??= options.launch().finally(() => { launching = undefined; }));
+      return await bidi.sessionInfo();
+    }
+  };
+  const mux = new RawMux({ command: (method, params, timeoutMs) => bidi.command(method, params, timeoutMs), sessionInfo });
   const ensureSession = (): Promise<JsonObject> => {
-    const ready = session.then(() => bidi.sessionInfo());
+    const ready = session.then(sessionInfo);
     session = ready.then(() => undefined, () => undefined);
     return ready;
   };
@@ -34,17 +58,25 @@ export function createBroker(bidi: BrokerUpstream, port: number) {
   bidi.onDisconnect(() => {
     for (const client of mux.dropAll()) { raw.get(client)?.close(1011, 'Firefox session ended'); raw.delete(client); }
   });
-  const idleCheck = (): void => {
-    if (clients.size === 0 && raw.size === 0) {
-      idleTimer = setTimeout(async () => { await bidi.close(); server.stop(true); }, 250);
-    }
+  const shutdown = async (): Promise<void> => {
+    closing = true;
+    clearTimeout(idleTimer);
+    await bidi.close();
+    server.stop(true);
+  };
+  const armIdle = (delayMs: number): void => {
+    clearTimeout(idleTimer);
+    if (clients.size === 0 && raw.size === 0) idleTimer = setTimeout(() => { void shutdown(); }, delayMs);
   };
 
   const server = Bun.serve<SocketData>({
     hostname: '127.0.0.1',
     port,
     fetch(request, server) {
-      if (server.upgrade(request, { data: { raw: new URL(request.url).pathname === '/session' } })) return;
+      if (closing) return new Response('foxpaw broker is shutting down', { status: 503 });
+      const path = new URL(request.url).pathname;
+      if (path === '/health') return Response.json(BROKER_HEALTH);
+      if (server.upgrade(request, { data: { raw: path === '/session' } })) return;
       return new Response('Firefox BiDi broker requires WebSocket', { status: 426 });
     },
     websocket: {
@@ -62,7 +94,7 @@ export function createBroker(bidi: BrokerUpstream, port: number) {
           await mux.close(client);           // before an idle shutdown can end the shared session
           raw.delete(client);
         } else clients.delete(socket);
-        idleCheck();
+        if (!closing) armIdle(250);
       },
       async message(socket, data) {
         if (typeof data !== 'string') return;
@@ -96,12 +128,21 @@ export function createBroker(bidi: BrokerUpstream, port: number) {
       },
     },
   });
+  if (options.startupGraceMs !== undefined) armIdle(options.startupGraceMs);
 
-  return { server, shutdown: async () => { await bidi.close(); server.stop(true); } };
+  return { server, shutdown };
 }
 
-if (import.meta.main) {
-  const broker = createBroker(new BidiClient(firefoxBidiUrl()), Number(process.env.FIREFOX_BIDI_BROKER_PORT ?? '9223'));
+/** Run the broker in this process until its last client leaves. FIREFOX_BIDI_AUTO_LAUNCH=1 starts a browser on demand. */
+export function runBroker(env: Record<string, string | undefined> = process.env) {
+  const port = Number(env.FIREFOX_BIDI_BROKER_PORT ?? (new URL(firefoxBidiBrokerUrl(env)).port || '9223'));
+  const broker = createBroker(new BidiClient(firefoxBidiUrl(env)), port, {
+    startupGraceMs: 60_000,
+    ...(env.FIREFOX_BIDI_AUTO_LAUNCH === '1' ? { launch: () => launchBrowser({ env }) } : {}),
+  });
   process.on('SIGINT', () => { void broker.shutdown(); });
   process.on('SIGTERM', () => { void broker.shutdown(); });
+  return broker;
 }
+
+if (import.meta.main) runBroker();
