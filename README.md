@@ -174,7 +174,7 @@ Pages are cheap to read. `snapshot` returns a compact text tree with element han
 | Zen 1.25t (Twilight), headless, Linux | 12/12 | 0 | 6 | 69 |
 | Firefox 160 in the NixOS VM test (`nix flake check`) | 12/12 | 0 | 6 | 69 |
 
-These are scripted tasks, so they measure the tool, not a model. `bun bench/agent.ts` runs the same tasks with a model driving foxpaw, Playwright MCP, or chrome-devtools-mcp and reports success, tokens, and side effects; it needs an `ANTHROPIC_API_KEY`, and those numbers will go here once they've been run. [benchmarks.md](docs/benchmarks.md)
+These are scripted tasks, so they measure the tool, not a model. `bun bench/agent.ts` runs the same tasks with a model driving foxpaw, Playwright MCP, or chrome-devtools-mcp and reports success, tokens, and side effects, through the Anthropic API or through Claude Code on a Claude subscription. Those numbers will go here once they've been run. [benchmarks.md](docs/benchmarks.md)
 
 ## Use it from your own programs
 
