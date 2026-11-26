@@ -5,7 +5,10 @@ import { firefoxBidiBrokerUrl, firefoxBidiUrl } from './config.ts';
 import { BidiClient, BidiError, BidiFeatureUnavailableError, BrowserUnavailableError, type BidiEvent, type JsonObject } from './bidi.ts';
 import { launchBrowser } from './launch.ts';
 import { refuseRequest } from './loopback.ts';
-import { RawMux, type RawClient } from './mux.ts';
+import { DEFAULT_HOLD_MS, Holder, HumanGate } from './human/gate.ts';
+import { Overlays } from './human/overlay.ts';
+import { loadHumanLoopSettings, parseHotkey, DEFAULT_HOTKEY, type HumanLoopSettings } from './human/settings.ts';
+import { ContextTree, RawMux, type RawClient } from './mux.ts';
 import { newToken, saveBrokerToken } from './token.ts';
 
 export type BrokerUpstream = Pick<BidiClient, 'command' | 'commandOptional' | 'sessionInfo' | 'subscribe' | 'unsubscribe' | 'onEvent' | 'onRawEvent' | 'onDisconnect' | 'close'>;
@@ -16,6 +19,8 @@ export type BrokerOptions = {
   launch?: () => Promise<unknown>;
   /** Exit when no client has connected this long after start (a broker spawned for a client that never came). */
   startupGraceMs?: number;
+  /** The `humanLoop` settings (pause hotkey, overlays); defaults when omitted. */
+  humanLoop?: HumanLoopSettings;
 };
 export type Broker = { port: number; shutdown(): Promise<void>; closed: Promise<void> };
 
@@ -33,10 +38,14 @@ export const BROKER_HEALTH = { foxpaw: 'broker' } as const;
  * Every request passes refuseRequest (no web-page Origin, loopback Host, the token on WebSocket handshakes).
  * Once the last client leaves, the broker ends the Firefox session and exits. From that moment it refuses new
  * connections and health checks (503), so a client never lands on a broker that is about to stop: it starts a new one.
+ *
+ * Every client command from either protocol passes the human loop (src/human): tab leases and the user's pause.
+ * Envelope kinds beyond BiDi: identify, lease, release, leases, pause, resume, pauseState (docs/human-loop.md).
  */
 export async function createBroker(bidi: BrokerUpstream, port: number, options: BrokerOptions): Promise<Broker> {
-  const clients = new Set<WebSocket>();
-  const raw = new Map<RawClient, WebSocket>();
+  const clients = new Map<WebSocket, Holder>();
+  const raw = new Map<RawClient, { ws: WebSocket; holder: Holder }>();
+  let nextHolder = 1;
   let idleTimer: NodeJS.Timeout | undefined;
   let closing = false;
   let session: Promise<unknown> = Promise.resolve();
@@ -52,7 +61,21 @@ export async function createBroker(bidi: BrokerUpstream, port: number, options: 
       return await bidi.sessionInfo();
     }
   };
-  const mux = new RawMux({ command: (method, params, timeoutMs) => bidi.command(method, params, timeoutMs), sessionInfo });
+  const tree = new ContextTree({ command: (method, params, timeoutMs) => bidi.command(method, params, timeoutMs) });
+  const overlays = new Overlays(bidi, options.humanLoop ?? { hotkey: parseHotkey(DEFAULT_HOTKEY), overlay: true }, (context) => tree.tab(context));
+  const gate = new HumanGate(tree, {
+    leased: (tab, holder) => overlays.install(tab, holder),
+    released: (tab, _holder, closedTab) => overlays.remove(tab, closedTab),
+    pauseChanged: () => overlays.refresh(),
+    pointer: (tab, points) => overlays.pointer(tab, points),
+  });
+  overlays.gate = gate;
+  const mux = new RawMux({
+    command: (method, params, timeoutMs) => bidi.command(method, params, timeoutMs),
+    sessionInfo,
+    forward: (client, method, params, timeoutMs) => gate.command(raw.get(client)!.holder, method, params, timeoutMs, (left) => bidi.command(method, params, left)),
+    ended: (client) => { const entry = raw.get(client); if (entry) gate.release(entry.holder); },
+  }, undefined, tree);
   const ensureSession = (): Promise<JsonObject> => {
     const ready = session.then(sessionInfo);
     session = ready.then(() => undefined, () => undefined);
@@ -60,12 +83,18 @@ export async function createBroker(bidi: BrokerUpstream, port: number, options: 
   };
   const broadcast = (message: { kind: 'event' } & BidiEvent): void => {
     const encoded = JSON.stringify(message);
-    for (const client of clients) client.send(encoded);
+    for (const client of clients.keys()) client.send(encoded);
   };
-  bidi.onEvent((event) => broadcast({ kind: 'event', ...event }));
-  bidi.onRawEvent((event) => mux.event(event));
+  const ownMessage = (event: BidiEvent) => event.method === 'script.message' && event.params.channel === overlays.channel;
+  bidi.onEvent((event) => { if (!ownMessage(event)) broadcast({ kind: 'event', ...event }); });
+  bidi.onRawEvent((event) => {
+    if (overlays.message(event)) return;
+    mux.event(event);
+    if (event.method === 'browsingContext.contextDestroyed' && typeof event.params.context === 'string') gate.closed(event.params.context);
+  });
   bidi.onDisconnect(() => {
-    for (const client of mux.dropAll()) { raw.get(client)?.close(1011, 'Firefox session ended'); raw.delete(client); }
+    gate.reset();
+    for (const client of mux.dropAll()) { raw.get(client)?.ws.close(1011, 'Firefox session ended'); raw.delete(client); }
   });
 
   const http = createServer((request: IncomingMessage, response: ServerResponse) => {
@@ -108,11 +137,14 @@ export async function createBroker(bidi: BrokerUpstream, port: number, options: 
     clearTimeout(idleTimer);
     idleTimer = undefined;
     let client: RawClient | undefined;
+    const id = nextHolder++;
+    const holder = new Holder(id, isRaw ? `BiDi client ${id}` : `client ${id}`);
     if (isRaw) {
       client = mux.open((message) => ws.send(JSON.stringify(message)));
-      raw.set(client, ws);
-    } else clients.add(ws);
+      raw.set(client, { ws, holder });
+    } else clients.set(ws, holder);
     ws.on('close', async () => {
+      gate.drop(holder);
       if (client) {
         await mux.close(client);           // before an idle shutdown can end the shared session
         raw.delete(client);
@@ -123,15 +155,15 @@ export async function createBroker(bidi: BrokerUpstream, port: number, options: 
       if (isBinary) return;
       const text = data.toString();
       if (client) { await mux.message(client, text); return; }
-      await envelope(ws, text);
+      await envelope(ws, holder, text);
     });
   };
 
-  const envelope = async (ws: WebSocket, data: string): Promise<void> => {
+  const envelope = async (ws: WebSocket, holder: Holder, data: string): Promise<void> => {
     let request: Record<string, unknown>;
     try { request = JSON.parse(data) as Record<string, unknown>; } catch { return; }
     if (typeof request.id !== 'number' || typeof request.kind !== 'string') return;
-    const respond = (message: JsonObject) => ws.send(JSON.stringify({ id: request.id, ...message }));
+    const respond = (message: JsonObject) => { if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ id: request.id, ...message })); };
     try {
       const params = request.params && typeof request.params === 'object' && !Array.isArray(request.params) ? request.params as JsonObject : {};
       const timeoutMs = typeof request.timeoutMs === 'number' && Number.isFinite(request.timeoutMs) && request.timeoutMs > 0 ? request.timeoutMs : undefined;
@@ -139,8 +171,9 @@ export async function createBroker(bidi: BrokerUpstream, port: number, options: 
         respond({ result: await ensureSession() });
       } else if (request.kind === 'command' || request.kind === 'commandOptional') {
         if (typeof request.method !== 'string') throw new Error('Broker command requires method');
+        const method = request.method;
         await ensureSession();
-        const result = request.kind === 'command' ? await bidi.command(request.method, params, timeoutMs) : await bidi.commandOptional(request.method, params, timeoutMs);
+        const result = await gate.command(holder, method, params, timeoutMs, (left) => request.kind === 'command' ? bidi.command(method, params, left) : bidi.commandOptional(method, params, left));
         respond({ result });
       } else if (request.kind === 'subscribe' || request.kind === 'unsubscribe') {
         const events = Array.isArray(request.events) && request.events.every((event) => typeof event === 'string') ? request.events : undefined;
@@ -149,10 +182,37 @@ export async function createBroker(bidi: BrokerUpstream, port: number, options: 
         await ensureSession();
         if (request.kind === 'subscribe') await bidi.subscribe(events, contexts); else await bidi.unsubscribe(events, contexts);
         respond({ result: {} });
-      } else throw new Error(`Unsupported broker request ${request.kind}`);
+      } else respond({ result: await humanLoop(holder, request.kind, request) });
     } catch (error) {
       if (error instanceof BidiError) respond({ error: { method: error.method, error: error.error, data: error.data, unavailable: error instanceof BidiFeatureUnavailableError } });
       else respond({ error: { method: 'broker', error: error instanceof Error ? error.message : String(error), data: {} } });
+    }
+  };
+
+  /** The human-loop envelope kinds (docs/human-loop.md). */
+  const humanLoop = async (holder: Holder, kind: string, request: Record<string, unknown>): Promise<JsonObject> => {
+    const owner = typeof request.owner === 'string' && request.owner.trim() ? request.owner.trim().slice(0, 60) : undefined;
+    const color = typeof request.color === 'string' && /^#[0-9a-f]{6}$/i.test(request.color) ? request.color : undefined;
+    const waitMs = typeof request.waitMs === 'number' && Number.isFinite(request.waitMs) && request.waitMs > 0 ? Math.min(request.waitMs, 3_600_000) : 0;
+    const leaseList = () => gate.leases().map((lease) => ({ context: lease.tab, owner: lease.holder.label, color: lease.holder.color, since: lease.since, mine: lease.holder === holder }));
+    switch (kind) {
+      case 'identify':
+        if (owner) { holder.rename(owner, color); overlays.refresh(); }
+        return { owner: holder.label, color: holder.color };
+      case 'lease': {
+        if (typeof request.context !== 'string') throw new Error('lease requires context');
+        if (owner) { holder.rename(owner, color); overlays.refresh(); }
+        await ensureSession();
+        const lease = await gate.lease(holder, request.context, waitMs);
+        return { context: lease.tab, owner: lease.holder.label };
+      }
+      case 'release':
+        return { released: gate.release(holder, typeof request.context === 'string' ? request.context : undefined) };
+      case 'leases': return { leases: leaseList(), pause: gate.pauseState };
+      case 'pause': return gate.pause(owner ?? holder.label);
+      case 'resume': return gate.resume();
+      case 'pauseState': return await gate.waitForResume(Math.min(waitMs, DEFAULT_HOLD_MS * 6));
+      default: throw new Error(`Unsupported broker request ${kind}`);
     }
   };
 
@@ -175,6 +235,7 @@ export async function runBroker(env: Record<string, string | undefined> = proces
   const broker = await createBroker(new BidiClient(firefoxBidiUrl(env)), port, {
     token,
     startupGraceMs: 60_000,
+    humanLoop: humanLoopSettings(env),
     ...(env.FIREFOX_BIDI_AUTO_LAUNCH === '1' ? { launch: () => launchBrowser({ env }) } : {}),
   });
   saveBrokerToken(broker.port, token, env);      // before any connection is processed: this runs in the same tick
@@ -182,4 +243,12 @@ export async function runBroker(env: Record<string, string | undefined> = proces
   process.on('SIGTERM', () => { void broker.shutdown(); });
   void broker.closed.then(() => process.exit(0));
   return broker;
+}
+
+/** An invalid `humanLoop` key must not keep the broker (and every agent) from starting: it falls back to defaults. */
+function humanLoopSettings(env: Record<string, string | undefined>): HumanLoopSettings {
+  try { return loadHumanLoopSettings(env); } catch (error) {
+    console.error(`foxpaw broker: ignoring the humanLoop settings: ${error instanceof Error ? error.message : String(error)}`);
+    return { hotkey: parseHotkey(DEFAULT_HOTKEY), overlay: true };
+  }
 }

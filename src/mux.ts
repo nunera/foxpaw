@@ -17,6 +17,10 @@ import { BidiError, type BidiEvent, type JsonObject } from './bidi.ts';
 export type MuxUpstream = {
   command(method: string, params?: JsonObject, timeoutMs?: number): Promise<JsonObject>;
   sessionInfo(): Promise<JsonObject>;
+  /** A client's own command, as opposed to the mux's bookkeeping. The broker passes it through tab leases and pause. */
+  forward?(client: RawClient, method: string, params: JsonObject, timeoutMs: number): Promise<JsonObject>;
+  /** The client's virtual session ended (session.end or disconnect): the broker releases its tab leases. */
+  ended?(client: RawClient): void;
 };
 
 const COMMAND_TIMEOUT_MS = 10 * 60_000;     // clients keep their own deadlines; navigation waits can be long
@@ -46,14 +50,56 @@ export class RawClient {
 const refused = (error: string, message: string) => new BidiError('broker', error, { message });
 const strings = (value: unknown): string[] => Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
 
+/** Which frames belong to which tab, shared by the mux (event routing) and the broker (tab leases). */
+export class ContextTree {
+  #parents = new Map<string, string | undefined>(); // browsing context -> parent (frames to their tab)
+  #tracking?: Promise<void>;
+
+  constructor(private readonly upstream: Pick<MuxUpstream, 'command'>) {}
+
+  /** Learn the contexts that exist now, then each one created (the events arrive through `event`). */
+  track(): Promise<void> {
+    this.#tracking ??= (async () => {
+      await this.upstream.command('session.subscribe', { events: ['browsingContext.contextCreated', 'browsingContext.contextDestroyed'] });
+      const tree = await this.upstream.command('browsingContext.getTree', {});
+      const walk = (nodes: unknown, parent?: string): void => {
+        for (const node of Array.isArray(nodes) ? nodes as JsonObject[] : []) {
+          if (typeof node.context !== 'string') continue;
+          this.#parents.set(node.context, parent);
+          walk(node.children, node.context);
+        }
+      };
+      walk(tree.contexts);
+    })().catch((error: unknown) => { this.#tracking = undefined; throw error; });
+    return this.#tracking;
+  }
+
+  created(context: string, parent: string | undefined): void { this.#parents.set(context, parent); }
+  destroyed(context: string): void { this.#parents.delete(context); }
+  has(context: string): boolean { return this.#parents.has(context); }
+
+  /** The top-level context (tab) a context belongs to; an unknown context counts as a tab of its own. */
+  tab(context: string): string;
+  tab(context: string | undefined): string | undefined;
+  tab(context: string | undefined): string | undefined {
+    let current = context;
+    for (let depth = 0; current !== undefined && depth < 64; depth++) {
+      const parent = this.#parents.get(current);
+      if (parent === undefined) return current;
+      current = parent;
+    }
+    return current;
+  }
+
+  clear(): void { this.#parents.clear(); this.#tracking = undefined; }
+}
+
 export class RawMux {
   readonly clients = new Set<RawClient>();
   #owners = new Map<string, RawClient>();          // intercept id -> its client
   #retired = new Set<string>();                    // intercepts of departed clients
-  #parents = new Map<string, string | undefined>(); // browsing context -> parent (frames to their tab)
-  #tracking?: Promise<void>;
 
-  constructor(private readonly upstream: MuxUpstream, private readonly timeoutMs = COMMAND_TIMEOUT_MS) {}
+  constructor(private readonly upstream: MuxUpstream, private readonly timeoutMs = COMMAND_TIMEOUT_MS, readonly tree = new ContextTree(upstream)) {}
 
   open(send: (message: JsonObject) => void): RawClient {
     const client = new RawClient(send);
@@ -69,8 +115,7 @@ export class RawMux {
   /** The Firefox session is gone, and every virtual session with it: returns the clients to disconnect. */
   dropAll(): RawClient[] {
     const clients = [...this.clients];
-    this.clients.clear(); this.#owners.clear(); this.#retired.clear(); this.#parents.clear();
-    this.#tracking = undefined;
+    this.clients.clear(); this.#owners.clear(); this.#retired.clear(); this.tree.clear();
     return clients;
   }
 
@@ -93,16 +138,16 @@ export class RawMux {
 
   event({ method, params }: BidiEvent): void {
     const context = typeof params.context === 'string' ? params.context : undefined;
-    if (method === 'browsingContext.contextCreated' && context) this.#parents.set(context, typeof params.parent === 'string' ? params.parent : undefined);
+    if (method === 'browsingContext.contextCreated' && context) this.tree.created(context, typeof params.parent === 'string' ? params.parent : undefined);
     if (params.isBlocked === true && Array.isArray(params.intercepts)) this.#blocked(method, params);
     else {
       const source = params.source && typeof params.source === 'object' ? (params.source as JsonObject).context : undefined;
-      const tab = this.#tab(context ?? (typeof source === 'string' ? source : undefined));
+      const tab = this.tree.tab(context ?? (typeof source === 'string' ? source : undefined));
       for (const client of this.clients) {
         if (client.session && this.#wants(client, method, tab)) client.send({ type: 'event', method, params });
       }
     }
-    if (method === 'browsingContext.contextDestroyed' && context) this.#parents.delete(context);
+    if (method === 'browsingContext.contextDestroyed' && context) this.tree.destroyed(context);
   }
 
   async #handle(client: RawClient, method: string, params: JsonObject): Promise<JsonObject> {
@@ -112,7 +157,7 @@ export class RawMux {
     if (method === 'session.new') {
       if (client.session) throw refused('session not created', 'Maximum number of active sessions');
       const info = await this.upstream.sessionInfo();
-      await this.#track();
+      await this.tree.track();
       client.session = crypto.randomUUID();
       return { sessionId: client.session, capabilities: (info.capabilities as JsonObject | undefined) ?? {} };
     }
@@ -123,7 +168,7 @@ export class RawMux {
         client.session = undefined;
         return {};
       case 'session.subscribe': {
-        const result = await this.#forward(method, params);
+        const result = await this.#forward(client, method, params);
         if (typeof result.subscription === 'string') {
           client.subscriptions.set(result.subscription, {
             events: strings(params.events), contexts: Array.isArray(params.contexts) ? new Set(strings(params.contexts)) : undefined });
@@ -133,39 +178,39 @@ export class RawMux {
       case 'session.unsubscribe': {
         const ids = Array.isArray(params.subscriptions) ? strings(params.subscriptions) : this.#matching(client, params);
         if (!ids.length || ids.some((id) => !client.subscriptions.has(id))) throw refused('invalid argument', 'no such subscription on this connection');
-        await this.#forward(method, { subscriptions: ids });
+        await this.#forward(client, method, { subscriptions: ids });
         for (const id of ids) client.subscriptions.delete(id);
         return {};
       }
       case 'network.addIntercept': {
-        const result = await this.#forward(method, params);
+        const result = await this.#forward(client, method, params);
         if (typeof result.intercept === 'string') { client.intercepts.add(result.intercept); this.#owners.set(result.intercept, client); }
         return result;
       }
       case 'network.removeIntercept': {
         const intercept = String(params.intercept);
         if (!client.intercepts.has(intercept)) throw refused('no such intercept', 'this connection did not add that intercept');
-        const result = await this.#forward(method, params);
+        const result = await this.#forward(client, method, params);
         client.intercepts.delete(intercept); this.#owners.delete(intercept);
         return result;
       }
       case 'script.addPreloadScript': {
-        const result = await this.#forward(method, params);
+        const result = await this.#forward(client, method, params);
         if (typeof result.script === 'string') client.preloads.add(result.script);
         return result;
       }
       case 'script.removePreloadScript': {
-        const result = await this.#forward(method, params);
+        const result = await this.#forward(client, method, params);
         client.preloads.delete(String(params.script));
         return result;
       }
     }
     if (ANSWERS[method] && typeof params.request === 'string') client.held.delete(params.request);
-    return await this.#forward(method, params);
+    return await this.#forward(client, method, params);
   }
 
-  #forward(method: string, params: JsonObject): Promise<JsonObject> {
-    return this.upstream.command(method, params, this.timeoutMs);
+  #forward(client: RawClient, method: string, params: JsonObject): Promise<JsonObject> {
+    return this.upstream.forward ? this.upstream.forward(client, method, params, this.timeoutMs) : this.upstream.command(method, params, this.timeoutMs);
   }
 
   /** The old by-events unsubscribe, limited to this client's own subscriptions. */
@@ -195,6 +240,7 @@ export class RawMux {
   }
 
   async #release(client: RawClient): Promise<void> {
+    this.upstream.ended?.(client);
     for (const id of client.intercepts) { this.#owners.delete(id); this.#retired.add(id); }
     await Promise.allSettled([...client.held].map(([request, phase]) => this.#answer(request, phase)));
     await Promise.allSettled([
@@ -203,33 +249,6 @@ export class RawMux {
       ...(client.subscriptions.size ? [this.upstream.command('session.unsubscribe', { subscriptions: [...client.subscriptions.keys()] })] : []),
     ]);
     client.held.clear(); client.intercepts.clear(); client.preloads.clear(); client.subscriptions.clear();
-  }
-
-  /** Learn which frames belong to which tab: contexts that exist now, then each one created. */
-  #track(): Promise<void> {
-    this.#tracking ??= (async () => {
-      await this.upstream.command('session.subscribe', { events: ['browsingContext.contextCreated', 'browsingContext.contextDestroyed'] });
-      const tree = await this.upstream.command('browsingContext.getTree', {});
-      const walk = (nodes: unknown, parent?: string): void => {
-        for (const node of Array.isArray(nodes) ? nodes as JsonObject[] : []) {
-          if (typeof node.context !== 'string') continue;
-          this.#parents.set(node.context, parent);
-          walk(node.children, node.context);
-        }
-      };
-      walk(tree.contexts);
-    })().catch((error: unknown) => { this.#tracking = undefined; throw error; });
-    return this.#tracking;
-  }
-
-  #tab(context: string | undefined): string | undefined {
-    let current = context;
-    for (let depth = 0; current !== undefined && depth < 64; depth++) {
-      const parent = this.#parents.get(current);
-      if (parent === undefined) return current;
-      current = parent;
-    }
-    return current;
   }
 
   #wants(client: RawClient, method: string, tab: string | undefined): boolean {

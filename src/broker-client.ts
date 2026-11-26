@@ -93,6 +93,13 @@ export async function ensureBroker(url: string = BROKER_URL, timeoutMs = 10_000)
   }
 }
 
+/** The broker running at `url`, without starting one; undefined when none runs (or it is shutting down). */
+export async function runningBroker(url: string = BROKER_URL): Promise<BrokerEndpoint | undefined> {
+  if (await health(url) !== 'broker') return undefined;
+  const token = readBrokerToken(Number(new URL(url).port || 80));
+  return token ? { url, token, sessionUrl: withToken(url, '/session', token) } : undefined;
+}
+
 function spawnBroker(url: string): ChildProcess {
   const { command, env } = brokerCommand();
   mkdirSync(dataDir(), { recursive: true });
@@ -112,7 +119,8 @@ export class BrokerBidiClient {
   #pending = new Map<number, Pending>();
   #listeners = new Set<(event: BidiEvent) => void>();
 
-  constructor(readonly url = BROKER_URL, readonly timeoutMs = 15_000) {
+  /** `start: false` connects only to a running broker (`foxpaw pause` must not start one that exits at once). */
+  constructor(readonly url = BROKER_URL, readonly timeoutMs = 15_000, readonly options: { start?: boolean } = {}) {
     const endpoint = new URL(url);
     if (endpoint.hostname !== '127.0.0.1' && endpoint.hostname !== 'localhost' && endpoint.hostname !== '::1') throw new Error(`Refusing non-loopback Firefox broker endpoint: ${endpoint.host}`);
   }
@@ -124,7 +132,10 @@ export class BrokerBidiClient {
   async unsubscribe(events: string[], contexts?: string[]): Promise<void> { await this.#request('unsubscribe', { events, ...(contexts?.length ? { contexts } : {}) }); }
   onEvent(listener: (event: BidiEvent) => void): () => void { this.#listeners.add(listener); return () => this.#listeners.delete(listener); }
 
-  /** Send a broker request of a kind other than the BiDi ones above (features such as tab leases add their own). */
+  /**
+   * Send a broker request of a kind other than the BiDi ones above: the human loop's identify, lease, release,
+   * leases, pause, resume, and pauseState (docs/human-loop.md).
+   */
   async request(kind: string, payload: JsonObject = {}, timeoutMs?: number): Promise<JsonObject> { return await this.#request(kind, payload, timeoutMs); }
 
   async close(): Promise<void> {
@@ -138,7 +149,9 @@ export class BrokerBidiClient {
     if (this.#socket?.readyState === WebSocket.OPEN) return this.#socket;
     const deadline = Date.now() + this.timeoutMs;
     for (;;) {
-      const { token } = await ensureBroker(this.url, Math.max(1_000, deadline - Date.now()));
+      const endpoint = this.options.start === false ? await runningBroker(this.url) : await ensureBroker(this.url, Math.max(1_000, deadline - Date.now()));
+      if (!endpoint) throw new Error(`No foxpaw broker is running at ${this.url}.`);
+      const { token } = endpoint;
       const socket = new WebSocket(withToken(this.url, '/', token));
       this.#socket = socket;
       socket.on('message', (data, isBinary) => { if (!isBinary) this.#receive(data.toString()); });
@@ -187,4 +200,10 @@ export class BrokerBidiClient {
     }
     pending.resolve(message.result && typeof message.result === 'object' && !Array.isArray(message.result) ? message.result as JsonObject : {});
   }
+}
+
+export type BrokerRequests = Pick<BrokerBidiClient, 'request'>;
+/** The broker's own requests, when `bidi` goes through the broker (features that need them are inert otherwise). */
+export function brokerRequests(bidi: object): BrokerRequests | undefined {
+  return typeof (bidi as Partial<BrokerRequests>).request === 'function' ? bidi as BrokerRequests : undefined;
 }
