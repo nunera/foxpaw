@@ -211,3 +211,19 @@ test('deny rules refuse without asking; reads on default config never touch the 
   expect(targeted).toBe(0);
   expect(described).toEqual([]);
 });
+
+test('signing in is a write, so logins don\'t ask; sign-up forms and risky buttons still do', async () => {
+  const login = { form: { action: 'https://bank.example/session', method: 'post', passwordFields: 1 } };
+  expect(classifyElement(element({ ...login, name: 'Sign in', text: 'Sign in' }), 'click').actionClass).toBe('write');
+  expect(classifyElement(element({ ...login, name: 'Continue', text: 'Continue' }), 'enter').actionClass).toBe('write');
+  // A one-password form whose button still says what it really does keeps its weight.
+  expect(classifyElement(element({ ...login, name: 'Confirm transfer', text: 'Confirm transfer' }), 'click').actionClass).toBe('irreversible');
+  // Two password fields: creating an account or changing a password.
+  const signUp = { form: { action: 'https://bank.example/users', method: 'post', passwordFields: 2 } };
+  expect(classifyElement(element({ ...signUp, name: 'Sign up', text: 'Sign up' }), 'click').actionClass).toBe('irreversible');
+  // submit_form follows the same rule; any other form stays irreversible.
+  const { runtime } = fakeRuntime({ facts: element({ ...login, name: 'Sign in', text: 'Sign in' }) });
+  expect((await classifyCall(call({ action: 'submit_form', tabId: 'tab_1', selector: '#login' }), runtime)).actionClass).toBe('write');
+  const other = fakeRuntime({ facts: element({ form: { action: 'https://shop.example/pay', method: 'post', passwordFields: 0 }, name: 'Next', text: 'Next' }) });
+  expect((await classifyCall(call({ action: 'submit_form', tabId: 'tab_1', selector: '#f' }), other.runtime)).actionClass).toBe('irreversible');
+});
