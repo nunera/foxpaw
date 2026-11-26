@@ -4,7 +4,7 @@ Fixture sites, tasks, and runners for foxpaw's benchmarks. See [docs/benchmarks.
 
 ```sh
 bun bench/run.ts                                              # deterministic suite, real headless browser
-bun bench/agent.ts --model MODEL --server foxpaw              # LLM agent benchmark, needs ANTHROPIC_API_KEY
+bun bench/agent.ts --model MODEL --server foxpaw              # LLM agent benchmark: ANTHROPIC_API_KEY, or --harness claude-code
 nix build path:.#checks.x86_64-linux.vm -L                    # deterministic suite in a NixOS VM
 ```
 

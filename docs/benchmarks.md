@@ -86,9 +86,11 @@ bun bench/agent.ts --model claude-sonnet-4-5 --server playwright
 bun bench/agent.ts --model claude-sonnet-4-5 --server chrome-devtools
 ```
 
-Options: `--task ID` (repeatable), `--max-turns N` (default 30), `--out DIR`, `--browser PATH` (foxpaw only).
+Options: `--task ID` (repeatable), `--max-turns N` (default 30), `--out DIR`, `--browser PATH` (foxpaw only), `--harness api|claude-code`.
 
-A minimal agent loop over the Anthropic Messages API: the model gets the task's goal and the MCP server's tools, and the loop runs tool calls until the model answers without one. Each task gets a fresh MCP server:
+`--harness claude-code` runs each task as `claude -p` instead, with the MCP server as its only tools (`--tools ""`), so it works on a Claude Pro or Max subscription without an API key (`--model sonnet`). Claude Code adds its own system prompt to every request, so its token counts are higher than the api harness's, by the same amount for every server.
+
+The default `api` harness is a minimal agent loop over the Anthropic Messages API: the model gets the task's goal and the MCP server's tools, and the loop runs tool calls until the model answers without one. Each task gets a fresh MCP server:
 
 - `foxpaw`: `bun src/cli.ts mcp`, against a headless browser the harness starts per task in the same throwaway environment as the deterministic suite, with the bench approver.
 - `playwright`: `npx -y @playwright/mcp@latest --headless --isolated` (needs a Playwright browser: `npx playwright install chromium`).
