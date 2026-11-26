@@ -1,6 +1,8 @@
 # Installing foxpaw
 
-foxpaw ships as an oh-my-pi plugin, an npm package that runs on Node 22+ or Bun 1.1+, standalone binaries with Bun built in, and a Nix flake. All of them give you the same `foxpaw` command; the omp plugin also gives you the `zen_browser` tool.
+foxpaw ships as an oh-my-pi plugin, a package you install from GitHub that runs on Node 22+ or Bun 1.1+, standalone binaries with Bun built in, and a Nix flake. All of them give you the same `foxpaw` command; the omp plugin also gives you the `zen_browser` tool.
+
+foxpaw isn't on the npm registry. The name `foxpaw` there belongs to an unrelated package, so `npm install foxpaw`, `bun add foxpaw`, `npx foxpaw`, and `omp plugin install foxpaw` install something else. Always install from `github:nunera/foxpaw`.
 
 After installing, check it works:
 
@@ -11,20 +13,12 @@ foxpaw help
 ## oh-my-pi
 
 ```sh
-omp plugin install github:nunera/foxpaw   # latest main
-omp plugin install foxpaw                 # latest npm release
+omp plugin install github:nunera/foxpaw
 ```
 
 omp runs the extension's TypeScript with its own Bun, so this needs nothing else. It doesn't put `foxpaw` on your PATH; install one of the routes below too if you want the command.
 
 ## npm and npx (Node 22+)
-
-From the npm registry:
-
-```sh
-npm install -g foxpaw
-npx foxpaw help          # without installing
-```
 
 From GitHub (the package builds `dist/` in its `prepare` script, so Bun must be on PATH):
 
@@ -42,8 +36,7 @@ npm install -g ./foxpaw-*.tgz
 ## Bun (1.1+)
 
 ```sh
-bun add -g foxpaw                              # npm release
-bun add -g --trust github:nunera/foxpaw        # latest main
+bun add -g --trust github:nunera/foxpaw
 ```
 
 Bun doesn't run a git dependency's `prepare` script unless you trust it; without `--trust`, the `foxpaw` command is missing because `dist/` was never built.

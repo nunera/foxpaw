@@ -49,6 +49,8 @@ Install the `foxpaw` command whichever way you already install things ([all rout
 | Nix | `nix profile install github:nunera/foxpaw`, or [the flake](#nix) |
 | neither | a binary from [Releases](https://github.com/nunera/foxpaw/releases), with its runtime inside |
 
+foxpaw isn't on the npm registry: an unrelated package owns the name `foxpaw` there, so always install from `github:nunera/foxpaw`.
+
 Then give your agent the `zen_browser` tool:
 
 | Agent | Run |
@@ -99,7 +101,7 @@ If a package manager owns the browser (Nix, Flatpak, a distro package), that dir
 
 Everything here is on by default except where it says otherwise, and it applies the same way in every host, because it lives in the tool rather than in a host's settings. One JSON file, `~/.config/foxpaw/config.json`, configures all of it.
 
-**Per-site policy.** Every call is a read, a write, or irreversible: submitting a form, paying, deleting, sending, `evaluate`, or clicking a button whose label says so. Each site gets `allow`, `ask`, or `deny` per class. With no config, irreversible actions ask. Asking means a desktop notification with Approve and Deny that you answer; no answer within two minutes is a no.
+**Per-site policy.** Every call is a read, a write, or irreversible: submitting a form, paying, deleting, sending, `evaluate`, or clicking a button whose label says so. Each site gets `allow`, `ask`, or `deny` per class. With no config, irreversible actions ask. Asking means a desktop prompt with Approve and Deny (a notification on Linux, a dialog on macOS and Windows); no answer within two minutes is a no.
 
 ```json
 {
@@ -167,7 +169,7 @@ Pages are cheap to read. `snapshot` returns a compact text tree with element han
 
 | Run | Tasks passed | Unintended side effects | Approvals asked | Tool calls |
 | --- | --- | --- | --- | --- |
-| Zen 1.25t, headless, this machine | 12/12 | 0 | 7 | 69 |
+| Zen 1.25t (Twilight), headless, Linux | 12/12 | 0 | 7 | 69 |
 | Firefox 160 in the NixOS VM test (`nix flake check`) | 12/12 | 0 | 7 | 69 |
 
 These are scripted tasks, so they measure the tool, not a model. `bun bench/agent.ts` runs the same tasks with a model driving foxpaw, Playwright MCP, or chrome-devtools-mcp and reports success, tokens, and side effects; it needs an `ANTHROPIC_API_KEY`, and those numbers will go here once they've been run. [benchmarks.md](docs/benchmarks.md)
@@ -191,7 +193,7 @@ url = subprocess.run(
 ).stdout.strip()
 ```
 
-From Node or Bun, import it:
+From Node or Bun, add it as a dependency (`bun add github:nunera/foxpaw`) and import it:
 
 ```ts
 import { BrokerBidiClient, launchBrowser, ZenBrowser } from 'foxpaw';
