@@ -7,6 +7,11 @@ import { BrokerBidiClient, ensureBroker } from './broker-client.ts';
 import { ZenBrowser } from './browser.ts';
 import { AUTOCONFIG, browserAppDir, defaultProfileDir, findBrowser, installAutoconfig, isListening, launchBrowser, profileLockOwner, type LaunchOptions } from './launch.ts';
 import { runBroker } from './broker.ts';
+import { runMcp } from './mcp/run.ts';
+import { policyCommand, secretsCommand } from './trust/commands.ts';
+import { logCommand } from './audit/log.ts';
+import { recordCommand, replayCommand } from './audit/replay.ts';
+import { humanLoopStatus, leasesCommand, pauseCommand, resumeCommand } from './human/commands.ts';
 
 /**
  * Setup and service commands. Each takes the arguments after its name. Features add theirs here (one entry each);
@@ -19,8 +24,17 @@ const COMMANDS: Record<string, (args: string[]) => Promise<void>> = {
     console.log((await ensureBroker(firefoxBidiBrokerUrl())).sessionUrl);
   },
   broker: async () => { await runBroker(); },
+  mcp: runMcp,
   status: async () => print(await status()),
   autoconfig: async (args) => autoconfig(args),
+  policy: policyCommand,
+  secrets: secretsCommand,
+  log: async (args) => logCommand(args),
+  record: async (args) => recordCommand(args),
+  replay: replayCommand,
+  pause: pauseCommand,
+  resume: resumeCommand,
+  leases: leasesCommand,
   help: async () => console.log(usage()),
 };
 
@@ -63,6 +77,8 @@ async function status() {
     profileOpenBy: profileLockOwner(profile) ?? null,
     remoteControl: { url: bidi.toString(), listening: await isListening(Number(bidi.port || 9222)) },
     broker: { url: brokerSessionUrl(), listening: await isListening(Number(broker.port || 9223)) },
+    // null: no broker runs. Otherwise {paused, since?, by?, leasedTabs}.
+    humanLoop: await humanLoopStatus(),
   };
 }
 
@@ -137,9 +153,31 @@ Setup:
                       Start the broker if needed and print its plain WebDriver BiDi URL
                       (${brokerSessionUrl()}). --launch also starts the browser (takes launch's options).
   broker              Run the broker in the foreground.
+  mcp [--http [--port N]]
+                      Serve the zen_browser tool to MCP hosts over stdio, or Streamable HTTP on
+                      127.0.0.1 (default port 9224) with a bearer token. See docs/mcp.md.
   status              Show the browser, profile, remote-control port, and broker.
   autoconfig install [dir] | autoconfig print
                       Copy the AutoConfig that --dynamic needs into the browser's install directory.
+
+Trust (see docs/policy.md, docs/secrets.md):
+  policy show | policy check <url> <action>
+                      Print the effective policy, or the decision for an action on a URL.
+  secrets list | secrets check <name>
+                      List configured secrets, or check one resolves (never prints values).
+
+Audit (see docs/audit.md):
+  log [--since 2h|2026-11-26] [--session ID] [--tab tab_3] [--action click] [--json] [--follow]
+                      Show what agents did in the browser (today by default).
+  record --session ID [--from N] [--to N] -o script.json
+                      Turn a session's successful page-changing actions into a replayable script.
+  replay script.json [--dry-run] [--tab-url substring] [--var NAME=VALUE ...]
+                      Run a script in a fresh tab (or the one tab matching --tab-url).
+
+Human loop (see docs/human-loop.md):
+  pause | resume      Hold every agent's input, navigation, and script commands until resumed
+                      (also Ctrl+Alt+P in an agent-controlled tab). status shows the state.
+  leases              Show which agent controls which tab.
 
 Pages (targets are unique URL or title substrings; runs through the broker):
   tabs

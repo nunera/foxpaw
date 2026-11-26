@@ -1,7 +1,7 @@
 import { setTimeout as sleep } from 'node:timers/promises';
-import { type BidiTransport, type BidiEvent, type JsonObject } from './bidi.ts';
+import { BidiError, type BidiTransport, type BidiEvent, type JsonObject } from './bidi.ts';
 import { detectCapabilities, type DetectedCapabilities } from './capabilities.ts';
-import { documentFrame, resolveLocator, semanticFunctions, type ElementIdentity, type FrameRef, type Locator, type ResolvedLocator } from './locator.ts';
+import { documentFrame, locateNodeFunction, pageNodesFunction, resolveLocator, semanticFunctions, type ElementIdentity, type FrameInfo, type FrameNodes, type Locator, type PageNode, type ResolvedLocator } from './locator.ts';
 
 export type Context = {
   id: string;
@@ -65,6 +65,11 @@ export class PageEvaluationError extends Error {
 /** Input was sent to the page, but reading the control back did not show the requested state. Retrying repeats the input. */
 export class InputVerificationError extends Error {
   override readonly name = 'InputVerificationError';
+}
+
+/** A node reference no longer points at an element in its document (removed, or the frame navigated). */
+export class StaleNodeError extends Error {
+  override readonly name = 'StaleNodeError';
 }
 
 export type InvalidField = { name: string; validationMessage: string };
@@ -157,9 +162,29 @@ export class ZenBrowser {
     return flattenContexts(result.contexts).map((entry) => entry.id);
   }
 
-  async frames(context: string): Promise<FrameRef[]> {
-    const contexts = await this.contexts();
-    return await Promise.all(contexts.filter((candidate) => candidate.id === context || isDescendant(candidate, context, contexts)).map((candidate) => documentFrame(this.evaluateValue.bind(this), candidate.id)));
+  /** The tab's frames, top first: one per browsing context in its tree, cross-origin ones included. Frames whose
+   * document can't be read right now (mid-navigation) are left out. */
+  async frames(context: string): Promise<FrameInfo[]> {
+    const result = await this.bidi.command('browsingContext.getTree', { root: context });
+    const tree = flattenContexts(result.contexts);
+    const frames = await Promise.all(tree.map(async (entry) => {
+      try {
+        return { ...await documentFrame(this.evaluateValue.bind(this), entry.id), url: entry.url, parent: entry.id === context ? null : entry.parent };
+      } catch (error) {
+        if (entry.id === context) throw error;
+        return undefined;
+      }
+    }));
+    return frames.filter((frame) => frame !== undefined);
+  }
+
+  /** The top-level context holding `context` (itself when it is one), or undefined once it is gone. */
+  async rootOf(context: string): Promise<string | undefined> {
+    const result = await this.bidi.command('browsingContext.getTree', {});
+    const all = flattenContexts(result.contexts);
+    let current = all.find((entry) => entry.id === context);
+    while (current?.parent) current = all.find((entry) => entry.id === current!.parent);
+    return current?.id;
   }
 
   async target(titleOrUrl: string): Promise<Context> {
@@ -193,12 +218,15 @@ export class ZenBrowser {
     return result.context;
   }
 
-  async openWithOutcome(url = 'about:blank', referenceContext?: string): Promise<OpenResult> {
+  /** Opens a tab (in `userContext` when given) and navigates it; a failed navigation is reported, not thrown. */
+  async openWithOutcome(url = 'about:blank', referenceContext?: string, userContext?: string): Promise<OpenResult> {
+    if (userContext) await this.requireFeature('browserUserContexts');
     // Created in the background, then selected: `background: false` has the same never-ending focus wait as activate.
     const result = await this.bidi.command('browsingContext.create', {
       type: 'tab',
       background: true,
       ...(referenceContext ? { referenceContext } : {}),
+      ...(userContext ? { userContext } : {}),
     });
     if (typeof result.context !== 'string') throw new Error('Firefox did not return a browsing-context ID');
     await this.activate(result.context);
@@ -284,6 +312,40 @@ export class ZenBrowser {
     return deserializeRemoteValue(result.result as JsonObject | undefined);
   }
 
+  /** Like evaluateValue, but DOM nodes come back as `{ sharedId }` and windows as `{ context }` (their browsing context). */
+  async evaluateReferences(context: string, expression: string, timeoutMs?: number): Promise<unknown> {
+    const result = await this.evaluate(context, expression, timeoutMs);
+    return deserializeRemoteValue(result.result as JsonObject | undefined, true);
+  }
+
+  /** Meaningful elements of one frame's document (see pageNodesFunction). */
+  async pageNodes(context: string, options: { root?: string; max: number; interactiveOnly?: boolean }): Promise<FrameNodes> {
+    const value = await this.evaluateReferences(context, `(${pageNodesFunction})(${JSON.stringify({ root: options.root?.trim() || undefined, max: options.max, interactiveOnly: options.interactiveOnly === true })})`);
+    if (!value || typeof value !== 'object' || !('nodes' in value) || !Array.isArray(value.nodes)) throw new Error('Firefox returned a malformed page snapshot');
+    const nodes = value.nodes.flatMap((raw: Record<string, unknown>) => {
+      const { node, childWindow, ...rest } = raw as { node?: { sharedId?: unknown }; childWindow?: { context?: unknown } };
+      if (typeof node?.sharedId !== 'string') return [];
+      return [{ ...rest, sharedId: node.sharedId, ...(typeof childWindow?.context === 'string' ? { childContext: childWindow.context } : {}) } as PageNode];
+    });
+    return { nodes, truncated: 'truncated' in value && value.truncated === true };
+  }
+
+  /** The current selector and identity of a node by its BiDi reference; throws StaleNodeError once it left its document. */
+  async locateNode(context: string, sharedId: string): Promise<{ selector: string; identity: ElementIdentity }> {
+    let result: JsonObject;
+    try {
+      result = await this.bidi.command('script.callFunction', { functionDeclaration: locateNodeFunction, target: { context }, awaitPromise: false, arguments: [{ sharedId }] });
+    } catch (error) {
+      if (error instanceof BidiError && (error.error === 'no such node' || error.error === 'no such frame')) throw new StaleNodeError(error.error);
+      throw error;
+    }
+    if (result.type === 'exception') throw new Error('Could not locate the element in the page');
+    const value = deserializeRemoteValue(result.result as JsonObject | undefined);
+    if (value === null) throw new StaleNodeError('node left the document');
+    if (!value || typeof value !== 'object' || !('selector' in value) || typeof value.selector !== 'string' || !('identity' in value)) throw new Error('Firefox returned a malformed node location');
+    return { selector: value.selector, identity: value.identity as ElementIdentity };
+  }
+
   async url(context: string): Promise<string> {
     const value = await this.evaluateValue(context, 'location.href');
     if (typeof value !== 'string') throw new Error('Firefox did not return the current URL');
@@ -307,36 +369,43 @@ export class ZenBrowser {
     }
   }
 
-  // Waits also search same-origin iframes; cross-origin frame content is unreachable from the top document.
+  // Every frame of the tab is checked, cross-origin ones through their own browsing context: the top document (and
+  // its same-origin frames) by an in-page observer that answers as soon as the condition holds, the other frames once
+  // per slice. Visible: any frame satisfies it. Hidden: every frame does.
   async waitFor(context: string, selector: string, timeoutMs = 10_000, state: WaitState = 'visible'): Promise<void> {
-    const visible = await this.evaluateValue(context, `new Promise((resolve, reject) => {
-      ${SAME_ORIGIN_DOCUMENTS}
-      const shown = (doc) => { let root = doc; let element; for (const part of __SELECTOR__.split('>>>').map(part => part.trim())) { element = root.querySelector(part); if (!element) return false; root = element.shadowRoot ?? element; } return Boolean(element.getClientRects().length && element.ownerDocument.defaultView.getComputedStyle(element).visibility !== 'hidden'); };
-      const ready = () => documents().some(shown) === __WANT_VISIBLE__;
-      if (ready()) return resolve(true);
-      const finish = () => { observer.disconnect(); clearInterval(poll); clearTimeout(timer); resolve(true); };
-      const observer = new MutationObserver(() => { if (ready()) finish(); });
-      const poll = setInterval(() => { if (ready()) finish(); }, 100);
-      const timer = setTimeout(() => { observer.disconnect(); clearInterval(poll); reject(new Error('Timed out waiting for selector to become __STATE__')); }, ${'__TIMEOUT__'});
-      observer.observe(document, { childList: true, subtree: true, attributes: true });
-    })`.replace('__SELECTOR__', JSON.stringify(selector)).replace('__WANT_VISIBLE__', String(state === 'visible')).replace('__STATE__', state).replace('__TIMEOUT__', String(timeoutMs)), timeoutMs + IN_PAGE_WAIT_MARGIN_MS);
-    if (visible !== true) throw new Error(`Timed out waiting for ${JSON.stringify(selector)} to become ${state}`);
+    const ready = `const shown = (doc) => { let root = doc; let element; for (const part of ${JSON.stringify(selector)}.split('>>>').map(part => part.trim())) { element = root.querySelector(part); if (!element) return false; root = element.shadowRoot ?? element; } return Boolean(element.getClientRects().length && element.ownerDocument.defaultView.getComputedStyle(element).visibility !== 'hidden'); };
+      const ready = () => documents().some(shown) === ${state === 'visible'};`;
+    await this.#waitInFrames(context, ready, { poll: 100, observe: '{ childList: true, subtree: true, attributes: true }' }, timeoutMs, state, `Timed out waiting for ${JSON.stringify(selector)} to become ${state}`);
   }
 
   async waitForText(context: string, text: string, timeoutMs = 10_000, state: WaitState = 'visible'): Promise<void> {
-    const found = await this.evaluateValue(context, `new Promise((resolve, reject) => {
-      ${SAME_ORIGIN_DOCUMENTS}
-      const ready = () => documents().some((doc) => doc.body?.innerText?.includes(${JSON.stringify(text)}) ?? false) === ${state === 'visible'};
-      if (ready()) return resolve(true);
-      let observer;
-      let poll;
-      const finish = () => { observer?.disconnect(); clearInterval(poll); clearTimeout(timeout); resolve(true); };
-      const timeout = setTimeout(() => { observer?.disconnect(); clearInterval(poll); reject(new Error('Timed out waiting for text to become ${state}')); }, ${timeoutMs});
-      observer = new MutationObserver(() => { if (ready()) finish(); });
-      poll = setInterval(() => { if (ready()) finish(); }, 25);
-      observer.observe(document, { childList: true, subtree: true, characterData: true, attributes: true });
-    })`, timeoutMs + IN_PAGE_WAIT_MARGIN_MS);
-    if (found !== true) throw new Error(`Timed out waiting for text ${JSON.stringify(text)} to become ${state}`);
+    const ready = `const ready = () => documents().some((doc) => doc.body?.innerText?.includes(${JSON.stringify(text)}) ?? false) === ${state === 'visible'};`;
+    await this.#waitInFrames(context, ready, { poll: 25, observe: '{ childList: true, subtree: true, characterData: true, attributes: true }' }, timeoutMs, state, `Timed out waiting for text ${JSON.stringify(text)} to become ${state}`);
+  }
+
+  // `ready` is in-page source defining `ready()`: true when the condition holds in that frame (and its same-origin frames).
+  async #waitInFrames(context: string, ready: string, watch: { poll: number; observe: string }, timeoutMs: number, state: WaitState, timeoutMessage: string): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const slice = Math.max(0, Math.min(deadline - Date.now(), FRAME_WAIT_SLICE_MS));
+      const children = (await this.treeIds(context).catch(() => [context])).filter((id) => id !== context);
+      const [top, ...others] = await Promise.all([
+        this.evaluateValue(context, `new Promise((resolve) => {
+          ${SAME_ORIGIN_DOCUMENTS}
+          ${ready}
+          if (ready()) return resolve(true);
+          const finish = (value) => { observer.disconnect(); clearInterval(poll); clearTimeout(timer); resolve(value); };
+          const observer = new MutationObserver(() => { if (ready()) finish(true); });
+          const poll = setInterval(() => { if (ready()) finish(true); }, ${watch.poll});
+          const timer = setTimeout(() => finish(false), ${slice});
+          observer.observe(document, ${watch.observe});
+        })`, slice + IN_PAGE_WAIT_MARGIN_MS),
+        // A frame that can't be read right now (navigating, closing) has no matching element or text.
+        ...children.map((child) => this.evaluateValue(child, `(() => { ${SAME_ORIGIN_DOCUMENTS} ${ready} return ready(); })()`).then((value) => value === true, () => state === 'hidden')),
+      ]);
+      if (state === 'visible' ? top === true || others.some(Boolean) : top === true && others.every(Boolean)) return;
+      if (Date.now() >= deadline) throw new Error(timeoutMessage);
+    }
   }
 
   async waitForDocumentChange(context: string, previous: string, timeoutMs = 10_000): Promise<void> {
@@ -572,7 +641,7 @@ export class ZenBrowser {
     const editable = await this.#withElement(context, selector, 'element => (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement || element.isContentEditable) && !element.disabled && !element.readOnly');
     if (editable !== true) throw new Error(`Target is not an editable text control; inspect again: ${JSON.stringify(selector)}`);
     await this.pointer(context, selector, 'click');
-    const focused = await this.#withElement(context, selector, 'element => { element.focus(); return document.activeElement === element; }');
+    const focused = await this.#withElement(context, selector, `element => { ${SHADOW_PIERCING} element.focus(); return deepActive() === element; }`);
     if (focused !== true) throw new Error(`Text target did not receive focus: ${JSON.stringify(selector)}`);
     const valueBefore = await this.#withElement(context, selector, 'element => element.value ?? element.textContent ?? ""');
     if (typeof valueBefore !== 'string') throw new Error(`Firefox did not return a text value for ${JSON.stringify(selector)}`);
@@ -661,7 +730,8 @@ export class ZenBrowser {
       const style = getComputedStyle(element);
       const x = Math.round(rect.left + rect.width / 2);
       const y = Math.round(rect.top + rect.height / 2);
-      const hit = rect.width > 0 && rect.height > 0 ? document.elementFromPoint(x, y) : null;
+      ${SHADOW_PIERCING}
+      const hit = rect.width > 0 && rect.height > 0 ? deepHit(x, y) : null;
       const input = element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement ? element : null;
       const label = input?.labels?.length ? [...input.labels].map(item => (item.innerText || item.textContent || '').trim()).filter(Boolean).join(' ') : element.getAttribute('aria-label');
       const describedBy = element.getAttribute('aria-describedby');
@@ -726,22 +796,24 @@ export class ZenBrowser {
     }`);
     if (current === checked) return;
     const useLabel = await this.#withElement(context, selector, `element => {
+      ${SHADOW_PIERCING}
       const label = element.labels?.[0] || element.closest('label');
       if (!label) return false;
       const rect = element.getBoundingClientRect();
       const style = getComputedStyle(element);
       if (!element.getClientRects().length || rect.width <= 0 || rect.height <= 0 || style.visibility === 'hidden' || style.display === 'none' || Number(style.opacity) === 0) return true;
-      const hit = document.elementFromPoint(Math.round(rect.left + rect.width / 2), Math.round(rect.top + rect.height / 2));
+      const hit = deepHit(Math.round(rect.left + rect.width / 2), Math.round(rect.top + rect.height / 2));
       return !hit || (hit !== element && !element.contains(hit));
     }`);
     if (useLabel === true) {
       await this.#withElement(context, selector, `element => {
+        ${SHADOW_PIERCING}
         const label = element.labels?.[0] || element.closest('label');
         if (!label) throw new Error('Hidden checkable input has no associated visible label');
         label.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
         if (!label.getClientRects().length) throw new Error('Associated label is not visible');
         const rect = label.getBoundingClientRect();
-        const hit = document.elementFromPoint(Math.round(rect.left + rect.width / 2), Math.round(rect.top + rect.height / 2));
+        const hit = deepHit(Math.round(rect.left + rect.width / 2), Math.round(rect.top + rect.height / 2));
         if (!hit || (hit !== label && !label.contains(hit) && !hit.contains(label))) throw new Error('Associated label is covered by another element');
         label.click();
       }`);
@@ -915,15 +987,6 @@ export class ZenBrowser {
   }
 }
 
-function isDescendant(candidate: Context, ancestor: string, contexts: Context[]): boolean {
-  let parent = candidate.parent;
-  while (parent) {
-    if (parent === ancestor) return true;
-    parent = contexts.find((context) => context.id === parent)?.parent ?? null;
-  }
-  return false;
-}
-
 function flattenContexts(value: unknown, parent: string | null = null): Context[] {
   if (!Array.isArray(value)) return [];
   const contexts: Context[] = [];
@@ -970,8 +1033,14 @@ const EXPRESSION_PREVIEW_LENGTH = 240;
 const PAGE_SUMMARY_TEXT_LENGTH = 300;
 // In-page waits reject on their own timer; the transport deadline must outlast it so the page's error wins.
 const IN_PAGE_WAIT_MARGIN_MS = 5_000;
+// Cross-frame waits re-read the tab's frame tree and check the other frames this often.
+const FRAME_WAIT_SLICE_MS = 300;
 // In-page source defining `documents()`: the top document plus every reachable same-origin (i)frame document, recursively.
 const SAME_ORIGIN_DOCUMENTS = `const documents = (doc = document, found = []) => { found.push(doc); for (const frame of doc.querySelectorAll('iframe,frame')) { try { if (frame.contentDocument) documents(frame.contentDocument, found); } catch {} } return found; };`;
+// In-page source defining `deepHit(x, y)` and `deepActive()`: elementFromPoint and activeElement retarget to a shadow
+// host; these descend through open shadow roots to the element actually hit or focused.
+const SHADOW_PIERCING = `const deepHit = (x, y) => { let hit = document.elementFromPoint(x, y); while (hit?.shadowRoot) { const inner = hit.shadowRoot.elementFromPoint(x, y); if (!inner || inner === hit) break; hit = inner; } return hit; };
+  const deepActive = () => { let active = document.activeElement; while (active?.shadowRoot?.activeElement) active = active.shadowRoot.activeElement; return active; };`;
 // How long `check` keeps reading the control back after input, for frameworks that update it asynchronously.
 const CHECK_SETTLE_MS = 1_000;
 // How long a tab activation may wait for its window to take focus (see `activate`); focused windows answer at once.
@@ -989,18 +1058,21 @@ function asAwaitedExpression(expression: string): string | undefined {
   }
 }
 
-function deserializeRemoteValue(remote: JsonObject | undefined): unknown {
+// With `references`, nodes become `{ sharedId }` and windows `{ context }`, so callers can address them again.
+function deserializeRemoteValue(remote: JsonObject | undefined, references = false): unknown {
   if (!remote || typeof remote.type !== 'string') return undefined;
   if (remote.type === 'undefined') return undefined;
   if (remote.type === 'null') return null;
+  if (references && remote.type === 'node') return { sharedId: remote.sharedId };
+  if (references && remote.type === 'window') return { context: (remote.value as JsonObject | undefined)?.context };
   if (remote.type === 'array' && Array.isArray(remote.value)) {
-    return remote.value.map((value) => deserializeRemoteValue(value as JsonObject));
+    return remote.value.map((value) => deserializeRemoteValue(value as JsonObject, references));
   }
   if (remote.type === 'object' && Array.isArray(remote.value)) {
     return Object.fromEntries(
       remote.value.flatMap((entry) => {
         if (!Array.isArray(entry) || typeof entry[0] !== 'string') return [];
-        return [[entry[0], deserializeRemoteValue(entry[1] as JsonObject)]];
+        return [[entry[0], deserializeRemoteValue(entry[1] as JsonObject, references)]];
       }),
     );
   }

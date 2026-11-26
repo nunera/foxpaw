@@ -4,9 +4,9 @@ import { join } from 'node:path';
 import type { z as Zod } from 'zod';
 import type { BidiTransport } from '../bidi.ts';
 import { BrokerBidiClient } from '../broker-client.ts';
-import { ZenBrowser, ZenEmptyTabContextFilter, PageEvaluationError, InputVerificationError, FormInvalidError, type Context, type OpenPrompt } from '../browser.ts';
+import { ZenBrowser, ZenEmptyTabContextFilter, PageEvaluationError, InputVerificationError, FormInvalidError, StaleNodeError, type Context, type OpenPrompt } from '../browser.ts';
 import { ActionScope, type ActionScopeResult, type WaitCondition, type WaitPredicate } from '../action-scope.ts';
-import { documentFrame, formSchema, queryElements, semanticSnapshot, type ElementIdentity, type FrameRef, type Locator, type ResolvedLocator } from '../locator.ts';
+import { documentFrame, formSchema, queryElements, sameIdentity, semanticSnapshot, type ElementIdentity, type FrameRef, type Locator, type ResolvedLocator } from '../locator.ts';
 import { summarizeDiagnostic } from '../diagnostics.ts';
 import { launchBrowser } from '../launch.ts';
 
@@ -46,8 +46,9 @@ export type ToolRuntime = {
   /** Resolves the element `target` names without acting on it; undefined when it names no element. */
   describe(context: Context, tabId: string, target: Target): Promise<TargetDescription | undefined>;
   pageState(context: Context): Promise<{ url: string; title: string; documentId: string }>;
-  /** Mints an el_* handle that core element actions accept. */
-  registerElement(record: ElementRecord): string;
+  /** Mints an el_* handle that core element actions accept. With `handle` (one it minted before), rebinds that handle
+   * to `record` instead, so a handle can stay the same while the element's selector or name changes. */
+  registerElement(record: ElementRecord, handle?: string): string;
 };
 
 export type ActionOutcome = { result?: ActionResult; error?: unknown; startedAt: number };
@@ -63,6 +64,8 @@ export type ToolFeature = {
   before?(call: ActionCall, runtime: ToolRuntime): Promise<void>;
   /** Runs after every action, success or failure, in feature order. Returning an outcome replaces it (redaction). */
   after?(call: ActionCall, outcome: ActionOutcome, runtime: ToolRuntime): Promise<ActionOutcome | void>;
+  /** The container (user context) `open` puts new tabs in, unless `isolation: "test"`; the first feature with one wins. */
+  space?(runtime: ToolRuntime): Promise<{ userContext: string; name: string } | undefined>;
   shutdown?(): Promise<void>;
 };
 export type BrowserToolOptions = { client?: BidiTransport; features?: ToolFeature[] };
@@ -116,7 +119,7 @@ export function createBrowserTool(z: typeof Zod, options: BrowserToolOptions = {
   const emptyTabContexts = new ZenEmptyTabContextFilter();
   const tabIds = new Map<string, string>();
   const elements = new Map<string, ElementRecord>();
-  const tabIsolation = new Map<string, 'live' | 'test'>();
+  const tabIsolation = new Map<string, 'live' | 'test' | 'space'>();
   const tabTestContext = new Map<string, string>();
   const testContexts = new Map<string, TestContext>();
   const eventBuffer: Array<{ method: string; params: Record<string, unknown>; receivedAt: number }> = [];
@@ -220,10 +223,19 @@ export function createBrowserTool(z: typeof Zod, options: BrowserToolOptions = {
       const record = elements.get(params.handle);
       if (!record) throw new Error(`Unknown element handle ${JSON.stringify(params.handle)}. Call inspect again.`);
       if (record.tabId !== currentTabId) throw new Error(`Element handle ${JSON.stringify(params.handle)} belongs to another tab.`);
-      const resolved = await browser.resolveLocator(context.id, record.locator);
-      const nodeId = await browser.elementId(resolved.frame.context, resolved.selector);
-      if (nodeId !== record.nodeId || resolved.frame.documentId !== record.frame.documentId || JSON.stringify(resolved.identity) !== JSON.stringify(record.identity)) throw new Error(`Stale element handle ${params.handle}. Call inspect again.`);
-      return resolved;
+      // Bound to the node itself, not to its selector: siblings appearing or disappearing don't break it.
+      const stale = `Stale element handle ${params.handle}. Call inspect (or snapshot) again.`;
+      if (!(await browser.treeIds(context.id)).includes(record.frame.context)) throw new Error(stale);
+      if ((await documentFrame(browser.evaluateValue.bind(browser), record.frame.context)).documentId !== record.frame.documentId) throw new Error(stale);
+      let located: { selector: string; identity: ElementIdentity };
+      try {
+        located = await browser.locateNode(record.frame.context, record.nodeId);
+      } catch (error) {
+        if (error instanceof StaleNodeError) throw new Error(stale);
+        throw error;
+      }
+      if (!sameIdentity(record.identity, located.identity)) throw new Error(stale);
+      return { selector: located.selector, frame: record.frame, identity: located.identity };
     }
     const locator: Locator = { ...params.locator };
     for (const [key, value, label] of [['css', params.selector, 'selector'], ['role', params.role, 'role'], ['name', params.name, 'name']] as const) {
@@ -232,6 +244,7 @@ export function createBrowserTool(z: typeof Zod, options: BrowserToolOptions = {
       locator[key] = value;
     }
     if (!locator.css && !locator.role) throw new Error('This action requires handle, selector, role, or locator (name alone does not identify an element).');
+    if (locator.frame && !(await browser.treeIds(context.id)).includes(locator.frame.context)) throw new Error(`locator.frame ${JSON.stringify(locator.frame.context)} is not a frame of ${currentTabId}. Use a frame from inspect or snapshot of this tab.`);
     return await browser.resolveLocator(context.id, locator);
   };
   const diagnose = (scope: ActionScope, error?: unknown) => {
@@ -289,20 +302,41 @@ export function createBrowserTool(z: typeof Zod, options: BrowserToolOptions = {
   };
   const verification = (verifyError: string | undefined) => verifyError === undefined ? {} : { verified: false, verifyError, note: UNVERIFIED_NOTE };
   const promptReport = (prompt: OpenPrompt) => ({ openPrompt: prompt, note: PROMPT_NOTE });
+  // Every frame of the tab, cross-origin ones included, top document first; elements from other frames name theirs.
   const inspect = async (context: Context, currentTabId: string, mode: 'interactive' | 'content' | 'semantic', root?: string, maxElements = 100) => {
-    const frame = await documentFrame(browser.evaluateValue.bind(browser), context.id);
-    // One extra element reveals whether the list was cut at maxElements.
-    const snapshot = await semanticSnapshot(browser.evaluateValue.bind(browser), frame, mode, maxElements + 1, root);
-    const nodes = await Promise.all(snapshot.slice(0, maxElements).map(async (node) => {
-      const item = node as Record<string, unknown>;
-      const handle = `el_${nextElement++}`;
-      const locator: Locator = { css: String(item.selector), role: typeof item.role === 'string' ? item.role : undefined, name: typeof item.name === 'string' ? item.name : undefined, exact: true, frame };
-      const identity = { tag: String(item.tag), role: typeof item.role === 'string' ? item.role : null, name: typeof item.name === 'string' ? item.name : null };
-      const nodeId = await browser.elementId(frame.context, locator.css!);
-      elements.set(handle, { tabId: currentTabId, locator, frame, identity, nodeId });
-      return { handle, ...item };
-    }));
-    return { tabId: currentTabId, frame, elements: nodes, count: nodes.length, truncated: snapshot.length > maxElements };
+    const frames = await browser.frames(context.id);
+    const top = frames[0]!;
+    const nodes: Record<string, unknown>[] = [];
+    let truncated = false;
+    for (const frame of frames) {
+      const remaining = maxElements - nodes.length;
+      // One extra element reveals whether the list was cut at maxElements. A child frame that can't be read
+      // (navigating away) contributes nothing; the top document's errors are the action's.
+      const snapshot = await semanticSnapshot(browser.evaluateValue.bind(browser), frame, mode, remaining + 1, root).catch((error: unknown) => {
+        if (frame === top) throw error;
+        return [];
+      });
+      if (snapshot.length > remaining) truncated = true;
+      nodes.push(...await Promise.all(snapshot.slice(0, remaining).map(async (node) => {
+        const item = node as Record<string, unknown>;
+        const handle = `el_${nextElement++}`;
+        const frameRef: FrameRef = { context: frame.context, documentId: frame.documentId };
+        const locator: Locator = { css: String(item.selector), role: typeof item.role === 'string' ? item.role : undefined, name: typeof item.name === 'string' ? item.name : undefined, exact: true, frame: frameRef };
+        const identity = { tag: String(item.tag), role: typeof item.role === 'string' ? item.role : null, name: typeof item.name === 'string' ? item.name : null };
+        const nodeId = await browser.elementId(frame.context, locator.css!);
+        elements.set(handle, { tabId: currentTabId, locator, frame: frameRef, identity, nodeId });
+        return { handle, ...item, ...(frame === top ? {} : { frame: { context: frame.context, url: frame.url } }) };
+      })));
+      if (truncated) break;
+    }
+    return {
+      tabId: currentTabId,
+      frame: { context: top.context, documentId: top.documentId },
+      ...(frames.length > 1 ? { frames: frames.slice(1).map(({ context: id, url, documentId, parent }) => ({ context: id, url, documentId, parent })) } : {}),
+      elements: nodes,
+      count: nodes.length,
+      truncated,
+    };
   };
   const assertValue = async (context: Context, targetSpec: Target, property: string, equals: unknown) => {
     const resolved = await resolve(context, tabId(context.id), targetSpec);
@@ -393,7 +427,7 @@ export function createBrowserTool(z: typeof Zod, options: BrowserToolOptions = {
   const description = [
       'Control visible real Zen and Firefox tabs (the user\'s logged-in profile) through local loopback WebDriver BiDi. `batch` runs reversible field edits sequentially, reports each completed step, and never rolls back browser side effects. `commit` is an explicit irreversible click.',
       '',
-      'Targeting: call `tabs` first and pass its `tabId` on every call. Actions that can change a page (click, fill, navigate, close, …) require `tabId` or a `target` matching one tab; they never act on whichever tab is focused. Prefer element `handle`s from `inspect`; `selector`, `role`, `name`, and `locator` narrow one element together and must match exactly one.',
+      'Targeting: call `tabs` first and pass its `tabId` on every call. Actions that can change a page (click, fill, navigate, close, …) require `tabId` or a `target` matching one tab; they never act on whichever tab is focused. Prefer element `handle`s from `inspect`; `selector`, `role`, `name`, and `locator` narrow one element together and must match exactly one. `inspect` and `query` cover every frame of the tab, cross-origin iframes included; an element from an iframe carries `frame: {context, url}`, and its handle acts inside that frame. A selector/role locator searches the top document unless `locator.frame` names a frame (from inspect `frames`).',
       '',
       'No browser: if a call fails with "No browser is listening", `launch` starts one for foxpaw in its own profile, next to the user\'s everyday browser (the user signs in there once). Do not tell the user to restart their everyday browser unless they ask to use that profile.',
       '',
@@ -402,7 +436,7 @@ export function createBrowserTool(z: typeof Zod, options: BrowserToolOptions = {
       'Verification: fill/type/select/check read the control back. `verified: false` with `verifyError` means the input WAS sent but the value differs: do not resend; inspect the field. `submit_form` checks form validity first and, if invalid, fails with `submitted: false` and `invalidFields`.',
       '',
       'Waiting: NEVER use bash `sleep` between browser steps. Put `waitFor` on the action that triggers the change (click, navigate, press, select, submit_form, batch steps); the wait is armed before input, so fast results are not missed. If only the wait fails, the response has `actionPerformed: true`, `waitCompleted: false`, `waitError`, and a page `summary` (a batch stops at that step): do not repeat the click; read the summary.',
-      '`waitFor`: a CSS selector string, `{selector?, text?, state?: "visible"|"hidden", url?, urlChanged?, documentChanged?, pageIdleMs?}` (every given key must hold), or `{anyOf: [...]}` (first match wins). `text` is a case-sensitive substring of the visible page text. Selector and text waits search the page and its same-origin iframes, not cross-origin iframes.',
+      '`waitFor`: a CSS selector string, `{selector?, text?, state?: "visible"|"hidden", url?, urlChanged?, documentChanged?, pageIdleMs?}` (every given key must hold), or `{anyOf: [...]}` (first match wins). `text` is a case-sensitive substring of the visible page text. Selector and text waits search every frame of the tab, cross-origin iframes included: "visible" holds when any frame matches, "hidden" when none does.',
       'Standalone waits, after the fact:',
       '- wait_for {selector | text | waitFor, timeoutMs}: returns when the element is visible or the text is present; `waitFor: {selector|text, state: "hidden"}` waits for it to disappear.',
       '- wait_for_change {selector?, timeoutMs}: returns on navigation or a content change. With `selector`, any change inside that element (its appearance counts); without, at least 24 changed characters or 3 elements in the main content.',
@@ -486,12 +520,17 @@ export function createBrowserTool(z: typeof Zod, options: BrowserToolOptions = {
               test.tabs.add(openedTabId);
               details = { tab: { tabId: openedTabId, url: opened.url, isolation: 'test' }, testContext: id };
             } else {
-              const opened = await browser.openWithOutcome(params.url, context.id);
+              let space: { userContext: string; name: string } | undefined;
+              for (const feature of features) if ((space = await feature.space?.(runtime))) break;
+              const opened = await browser.openWithOutcome(params.url, context.id, space?.userContext);
+              const openedTabId = tabId(opened.context.id);
+              if (space) tabIsolation.set(openedTabId, 'space');
               details = {
-                tabId: tabId(opened.context.id),
+                tabId: openedTabId,
                 created: opened.created,
                 navigationStarted: opened.navigationStarted,
                 url: opened.context.url,
+                ...(space ? { isolation: 'space', space: space.name } : {}),
                 ...(opened.error === undefined ? {} : { error: opened.error }),
               };
             }
@@ -526,7 +565,13 @@ export function createBrowserTool(z: typeof Zod, options: BrowserToolOptions = {
             details = { tabId: currentTabId, tables };
           } else if (params.action === 'query') {
             if (!params.selector?.trim()) throw new Error('query requires selector');
-            const matches = await queryElements(browser.evaluateValue.bind(browser), context.id, params.selector, params.fields);
+            const selector = params.selector;
+            const frames = await browser.frames(context.id);
+            const matches = (await Promise.all(frames.map(async (frame, index) => {
+              if (index === 0) return await queryElements(browser.evaluateValue.bind(browser), frame.context, selector, params.fields);
+              const found = await queryElements(browser.evaluateValue.bind(browser), frame.context, selector, params.fields).catch(() => []);
+              return found.map((match) => ({ ...match as Record<string, unknown>, frame: { context: frame.context, url: frame.url } }));
+            }))).flat();
             details = { tabId: currentTabId, elements: matches.slice(0, QUERY_LIMIT), total: matches.length, truncated: matches.length > QUERY_LIMIT };
           } else if (params.action === 'batch') {
             if (!params.batch?.length) throw new Error('batch requires at least one step');
@@ -778,10 +823,15 @@ export function createBrowserTool(z: typeof Zod, options: BrowserToolOptions = {
     resolve,
     describe,
     pageState,
-    registerElement: (record) => {
-      const handle = `el_${nextElement++}`;
-      elements.set(handle, record);
-      return handle;
+    registerElement: (record, handle) => {
+      if (handle !== undefined) {
+        if (!elements.has(handle)) throw new Error(`Unknown element handle ${JSON.stringify(handle)}`);
+        elements.set(handle, record);
+        return handle;
+      }
+      const minted = `el_${nextElement++}`;
+      elements.set(minted, record);
+      return minted;
     },
   };
   const handlers = Object.fromEntries(features.flatMap((feature) => Object.entries(feature.actions ?? {})));

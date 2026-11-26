@@ -1,7 +1,7 @@
 {
   "name": "foxpaw",
-  "version": "0.2.0",
-  "description": "An oh-my-pi tool that lets an AI agent use the Zen or Firefox you already have open, signed in, over WebDriver BiDi.",
+  "version": "0.3.0",
+  "description": "Let an AI agent use a Zen or Firefox that's signed in to your accounts, safely: per-site policy, secrets the model never sees, audit log, MCP and oh-my-pi.",
   "license": "MIT",
   "repository": {
     "type": "git",

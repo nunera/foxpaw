@@ -24,9 +24,13 @@ test('registers the significant page-change wait action', async () => {
   expect(() => registered.parameters.parse({ action: 'click', waitFor: { anyOf: [{ text: 'x' }], selector: '#y' } })).toThrow();
   expect(() => registered.parameters.parse({ action: 'click', waitFor: { txt: 'typo' } })).toThrow();
   expect(() => registered.parameters.parse({ action: 'batch', batch: [{ action: 'click', waitFor: { state: 'gone' } }] })).toThrow();
-  for (const removed of ['controls', 'form_values', 'clear_many', 'trace_start', 'trace_replay', 'state_export', 'emulate', 'permissions', 'route_add', 'report', 'diagnostics', 'downloads']) {
+  for (const removed of ['controls', 'form_values', 'clear_many', 'trace_start', 'trace_replay', 'state_export', 'emulate', 'permissions', 'route_add', 'report', 'diagnostics']) {
     expect(() => registered.parameters.parse({ action: removed, tabId: 'tab_1' })).toThrow();
   }
+  expect(registered.parameters.parse({ action: 'snapshot', tabId: 'tab_1', maxNodes: 50, full: true })).toMatchObject({ action: 'snapshot', maxNodes: 50, full: true });
+  expect(registered.parameters.parse({ action: 'screenshot', tabId: 'tab_1', marks: true })).toMatchObject({ marks: true });
+  expect(registered.parameters.parse({ action: 'wait_download', tabId: 'tab_1', timeoutMs: 30_000 })).toMatchObject({ action: 'wait_download' });
+  expect(registered.parameters.parse({ action: 'downloads' })).toMatchObject({ action: 'downloads' });
   expect(registered.parameters.parse({ action: 'dialog', tabId: 'tab_1', dialogAction: 'accept' })).toMatchObject({ dialogAction: 'accept' });
   expect(registered.parameters.parse({ action: 'check', tabId: 'tab_1', selector: 'input[type=checkbox]', role: 'checkbox', name: 'Section 001', checked: true })).toMatchObject({ selector: 'input[type=checkbox]', role: 'checkbox', name: 'Section 001' });
   expect(registered.description).toContain('call `tabs` first');

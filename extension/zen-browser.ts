@@ -5,7 +5,7 @@ import { defaultFeatures } from '../src/tool/features/index.ts';
 
 // The oh-my-pi host passes its own zod (pi.zod), possibly zod 3; the tool sticks to APIs both versions share.
 export default function registerZenBrowser(pi: ExtensionAPI) {
-  const tool = createBrowserTool(pi.zod as unknown as typeof Zod, { features: defaultFeatures() });
+  const tool = createBrowserTool(pi.zod as unknown as typeof Zod, { features: defaultFeatures({ host: 'omp' }) });
   pi.on('session_shutdown', () => tool.shutdown());
   pi.registerTool({
     name: tool.name,

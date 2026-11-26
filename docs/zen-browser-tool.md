@@ -17,7 +17,7 @@ Element actions take one of:
 
 `selector`, `role`, `name`, and the `locator` fields are merged into one locator, and all of them must match the same single element; a field that conflicts with the same `locator` field is an error. `name` alone doesn't identify an element. A `handle` can't be combined with the others.
 
-A handle stores its frame, document ID, and identity (tag, role, accessible name, node ID). If any of those no longer match, or a locator matches more than one element, the action fails instead of guessing.
+A handle is bound to the element itself (its BiDi node ID) in one frame document, so siblings appearing or disappearing don't break it. If the frame's document changed, the element left it, or its tag, role, or accessible name changed, or a locator matches more than one element, the action fails instead of guessing. `snapshot` (see [agent-ux.md](agent-ux.md)) returns handles that stay the same across calls.
 
 Handles are scoped to one document. `tabId`s survive navigation but not a new omp session; in a new session, call `tabs` and `inspect` again.
 
@@ -36,8 +36,8 @@ Dialogs are tracked from the first tool call of the session; one that was alread
 | Action | Notes |
 | --- | --- |
 | `tabs` | Lists tabs (with `openPrompt` where a dialog is open) and whether this build supports user contexts (`capabilities`). |
-| `inspect` | Returns handles. `mode` is `interactive` (default), `content`, or `semantic`. `root` limits the scope and is included if it matches. `maxElements` defaults to 100 (max 500). The response gives the `frame` once, then `elements`, `count`, and `truncated: true` when more elements matched than were returned. `semantic` is a DOM-derived snapshot with landmark paths, not the browser's accessibility tree. |
-| `query` | Requires `selector`. Returns matches in the top-level document in document order, hidden elements included, up to 200, with `total` and `truncated`. `fields` maps output names to `tag`, `role`, `name`, `text`, or an HTML attribute name; missing attributes come back as `null`. Doesn't search iframes or shadow roots. |
+| `inspect` | Returns handles. `mode` is `interactive` (default), `content`, or `semantic`. `root` limits the scope and is included if it matches. `maxElements` defaults to 100 (max 500). Covers every frame of the tab, cross-origin iframes included: elements from a child frame carry `frame: { context, url }`, and `frames` lists the child frames. The response gives the top `frame` once, then `elements`, `count`, and `truncated: true` when more elements matched than were returned. `semantic` is a DOM-derived snapshot with landmark paths, not the browser's accessibility tree. |
+| `query` | Requires `selector`. Returns matches in document order, top document first, then each iframe's (cross-origin too, with `frame: { context, url }`), hidden elements included, up to 200, with `total` and `truncated`. `fields` maps output names to `tag`, `role`, `name`, `text`, or an HTML attribute name; missing attributes come back as `null`. Doesn't search shadow roots. |
 | `table` | Extracts headers and cell text from `<table>` elements under `selector` or `root`. Each table returns at most 200 rows, with `rowCount` and `truncated`. |
 | `form_schema` | Lists the visible fields in the page (or under `root`) with label, kind, value, required/disabled, select options, and the submit control. Hidden inputs, passwords, and token/session/auth-looking fields are left out. |
 | `field_state` | Current state of one field, including whether something is covering it. |
@@ -98,7 +98,7 @@ Wait for the final content, not a loading placeholder: `{ "anyOf": [{ "text": "R
 
 If the input went through but the wait failed, the response has `actionPerformed: true`, `waitCompleted: false`, `waitError`, and `summary: { heading, text }` of the page as it is now. Don't retry blindly in that case; the click already happened. Failure responses carry a `diagnostic` with the last 20 navigation, network, and console entries seen during the action (`networkCount` gives the full network count).
 
-Selector and text waits search the top document and same-origin iframes. Content inside cross-origin iframes is not visible to them.
+Selector and text waits search every frame of the tab, cross-origin iframes included (each through its own browsing context): `visible` holds as soon as any frame matches, `hidden` once none does.
 
 ### Events
 
@@ -109,3 +109,20 @@ Selector and text waits search the top document and same-origin iframes. Content
 Event buffers are redacted (see the README) and live only in memory.
 
 If the browser lacks user-context support, `open` with `isolation: "test"` fails with `Feature unavailable in this Zen/Firefox build: browserUserContexts`.
+
+### Snapshots, marks, and downloads
+
+| Action | Notes |
+| --- | --- |
+| `snapshot` | A compact text tree of the page (`role "name" [states] el_N`), cross-origin iframes included. Later calls on the same document return only what changed; `full: true` forces the whole tree. See [agent-ux.md](agent-ux.md). |
+| `screenshot` with `marks: true` | Draws numbered boxes over interactive elements for this capture only and returns `marks: [{ n, handle, role, name, box }]`. |
+| `downloads`, `wait_download` | Lists this session's downloads, or waits for the one the preceding action started. Files land in foxpaw's download folder (config `downloads`). |
+
+### Secrets and shared tabs
+
+| Action | Notes |
+| --- | --- |
+| `fill_secret` | Fills a field with a secret named in the config (`secret: "bank"`). The value comes from pass, Bitwarden, 1Password, the keyring, or an environment variable, only on the origins listed for it, and never appears in any result. See [secrets.md](secrets.md). |
+| `release` | Gives up this session's lease on a tab so another agent can act on it. Tabs another session holds show `leasedBy: "other"` in `tabs`. See [human-loop.md](human-loop.md). |
+
+Before any action runs, the policy ([policy.md](policy.md)) may refuse it or wait for a person to approve it; a refusal comes back with `actionPerformed: false` and `policy: { decision, reason }`. A paused session ([human-loop.md](human-loop.md)) waits for the person to hand control back. Every action is recorded in the audit log ([audit.md](audit.md)).

@@ -6,26 +6,26 @@
 </p>
 
 <p align="center">
-  Let an AI agent, or any program, use a Zen or Firefox that's signed in to your accounts.<br>
-  An <a href="https://github.com/can1357/oh-my-pi">oh-my-pi</a> tool and a small CLI, over WebDriver BiDi.
+  Let an AI agent use a Zen or Firefox that's signed in to your accounts, without handing it the keys.<br>
+  Works in Claude Code, Codex, Cursor, and any MCP host, and natively in <a href="https://github.com/can1357/oh-my-pi">oh-my-pi</a>.
 </p>
 
 <p align="center">
   <img alt="Zen and Firefox" src="https://img.shields.io/badge/Zen%20%C2%B7%20Firefox-real%20profile-ff7139?style=flat-square&labelColor=141414&logo=firefoxbrowser&logoColor=ff7139">
   <img alt="WebDriver BiDi" src="https://img.shields.io/badge/WebDriver-BiDi-f3f4f0?style=flat-square&labelColor=141414">
-  <img alt="Loopback only" src="https://img.shields.io/badge/network-loopback%20only-ff7139?style=flat-square&labelColor=141414">
-  <img alt="Bun" src="https://img.shields.io/badge/Bun-1.x-f3f4f0?style=flat-square&labelColor=141414&logo=bun&logoColor=f3f4f0">
+  <img alt="MCP" src="https://img.shields.io/badge/MCP-stdio%20%C2%B7%20HTTP-f3f4f0?style=flat-square&labelColor=141414">
+  <img alt="Loopback only" src="https://img.shields.io/badge/network-loopback%20%2B%20token-ff7139?style=flat-square&labelColor=141414">
+  <img alt="Node and Bun" src="https://img.shields.io/badge/Node%2022%20%C2%B7%20Bun-f3f4f0?style=flat-square&labelColor=141414&logo=nodedotjs&logoColor=f3f4f0">
   <img alt="Nix flake" src="https://img.shields.io/badge/Nix-flake-f3f4f0?style=flat-square&labelColor=141414&logo=nixos&logoColor=7ebae4">
-  <img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-strict-f3f4f0?style=flat-square&labelColor=141414&logo=typescript&logoColor=f3f4f0">
 </p>
 
 <p align="center">
   <a href="#get-started">Get started</a> ·
+  <a href="#safety">Safety</a> ·
   <a href="#how-it-works">How it works</a> ·
   <a href="#what-the-agent-gets-back">Responses</a> ·
-  <a href="#use-it-from-your-own-programs">Programs</a> ·
+  <a href="#benchmarks">Benchmarks</a> ·
   <a href="#nix">Nix</a> ·
-  <a href="#security">Security</a> ·
   <a href="#reference">Reference</a>
 </p>
 
@@ -37,20 +37,27 @@ Playwright and Selenium start their own clean browser. That's what you want for 
 
 foxpaw gives the agent a browser that already has your logins. Usually that's one foxpaw starts next to your everyday browser, in a profile of its own that you sign in to once. It can also be your everyday profile. Either way the agent works in real tabs, and you can watch it click.
 
-Working in a signed-in browser changes what a mistake costs. If the agent misreads a page in a test browser, you rerun the test. Here it might submit a form twice. Most of the code exists so the agent can tell what a click actually did before it decides what to do next.
+Working in a signed-in browser changes what a mistake costs. If the agent misreads a page in a test browser, you rerun the test. Here it might pay twice, or delete the wrong thing. So foxpaw is built around not letting that happen: you decide per site what the agent may do, it asks before anything irreversible, it never sees your passwords, every action is logged, and you can freeze it with a key press.
 
 ## Get started
 
-Install it whichever way you already install things:
+Install the `foxpaw` command whichever way you already install things ([all routes](docs/install.md)):
 
-| You use | Run | You get |
-| --- | --- | --- |
-| oh-my-pi | `omp plugin install github:nunera/foxpaw` | the `zen_browser` tool (omp brings its own Bun) |
-| Bun 1.1+ | `bun add -g --trust github:nunera/foxpaw` | the `foxpaw` command |
-| Nix | `nix run github:nunera/foxpaw -- launch` | a one-off run; [install it properly](#nix) |
-| none of these | a binary from [Releases](https://github.com/nunera/foxpaw/releases) | one file with its runtime inside |
+| You use | Run |
+| --- | --- |
+| Bun 1.1+ | `bun add -g --trust github:nunera/foxpaw` |
+| Nix | `nix profile install github:nunera/foxpaw`, or [the flake](#nix) |
+| neither | a binary from [Releases](https://github.com/nunera/foxpaw/releases), with its runtime inside |
 
-Then start a browser for it:
+Then give your agent the `zen_browser` tool:
+
+| Agent | Run |
+| --- | --- |
+| Claude Code | `claude mcp add foxpaw -- foxpaw mcp` |
+| Codex, Cursor, any MCP host | command `foxpaw`, args `["mcp"]` ([snippets](docs/mcp.md)) |
+| oh-my-pi | `omp plugin install github:nunera/foxpaw` (no separate install needed; omp brings its own Bun) |
+
+Start a browser for it:
 
 ```sh
 foxpaw launch
@@ -58,7 +65,7 @@ foxpaw launch
 
 A new Zen or Firefox window opens. It's a separate process with its own profile, so your everyday browser keeps running. Sign in to the sites the agent should use; the logins stay for next time.
 
-In oh-my-pi, open a new session (tools load at startup) and ask for something in the browser. The agent calls `tabs`, then `inspect` for element handles, then acts on them. If it finds no browser running, it can call `launch` itself.
+Ask your agent for something in the browser. It calls `tabs`, then `snapshot` or `inspect` for element handles, then acts on them. If no browser is running, it can call `launch` itself.
 
 ## Start a browser
 
@@ -88,6 +95,33 @@ foxpaw launch --dynamic
 
 If a package manager owns the browser (Nix, Flatpak, a distro package), that directory is read-only or gets replaced on update. Build the AutoConfig into the package instead; [Nix](#nix) shows how. Dynamic mode always listens on port 9222.
 
+## Safety
+
+Everything here is on by default except where it says otherwise, and it applies the same way in every host, because it lives in the tool rather than in a host's settings. One JSON file, `~/.config/foxpaw/config.json`, configures all of it.
+
+**Per-site policy.** Every call is a read, a write, or irreversible: submitting a form, paying, deleting, sending, `evaluate`, or clicking a button whose label says so. Each site gets `allow`, `ask`, or `deny` per class. With no config, irreversible actions ask. Asking means a desktop notification with Approve and Deny that you answer; no answer within two minutes is a no.
+
+```json
+{
+  "policy": {
+    "default": { "read": "allow", "write": "allow", "irreversible": "ask" },
+    "sites": [{ "match": "*.bank.example", "write": "ask", "irreversible": "deny" }]
+  }
+}
+```
+
+Targets inside an iframe are judged by the iframe's site too, and the stricter rule wins. [policy.md](docs/policy.md) has the full rules and the other ways to approve.
+
+**Secrets the model never sees.** `fill_secret` types a password from `pass`, Bitwarden, 1Password, the system keyring, or an environment variable. The agent only names it (`"secret": "bank"`), and foxpaw fills it only on the origins you list for it, so a prompt-injected page on another site can't ask for it. Afterwards the value is scrubbed from every result and error, and `evaluate` is refused on that page. [secrets.md](docs/secrets.md)
+
+**An audit log.** Every action, including refused ones, goes to a daily log under `~/.local/state/foxpaw/audit/`, with before and after screenshots for writes. Typed values aren't logged, only their length. `foxpaw log` browses it, and `foxpaw record` turns a session into a script that `foxpaw replay` runs again without a model. [audit.md](docs/audit.md)
+
+**You can take over.** Press Ctrl+Alt+P in a tab the agent is using (or run `foxpaw pause`) and every agent stops before its next input; press it again to hand control back. Tabs an agent holds show a small label and its cursor. Two agents can't act on the same tab: the first one to touch it holds it until it lets go. Set `"spaces": { "enabled": true }` and each agent session gets its own container, with its own cookies. [human-loop.md](docs/human-loop.md)
+
+**The connection.** Firefox's remote control has no authentication, so foxpaw keeps it to this machine and adds what it can on top. The broker and the MCP HTTP server bind to 127.0.0.1 only, refuse any request a web page could send (anything with an `Origin` header, or a `Host` that isn't loopback, which is what DNS rebinding uses), and require a token that's new each time they start and readable only by you (`$XDG_RUNTIME_DIR/foxpaw/`). Page dialogs stay open instead of being dismissed for you, and event buffers drop cookies, auth headers, bodies, and typed text.
+
+Don't add `--remote-allow-hosts`, `--remote-allow-origins`, or `--remote-allow-system-access`. Mozilla's [Security aspects of the Remote Agent](https://firefox-source-docs.mozilla.org/remote/Security.html) has the details. One honest limit: a program running as you can read your token, just as it can read your browser profile. foxpaw protects you from web pages and from other users, not from your own malware.
+
 ## How it works
 
 <picture>
@@ -95,13 +129,14 @@ If a package manager owns the browser (Nix, Flatpak, a distro package), that dir
   <img src="docs/assets/how-it-works-light.svg" width="100%" alt="Three agent sessions connect to the foxpaw broker on 127.0.0.1:9223. The broker holds the one WebDriver BiDi session to your signed-in Zen or Firefox on port 9222, where the agent's pointer clicks Register on a registration page.">
 </picture>
 
-Firefox allows one WebDriver BiDi session at a time, so a small broker holds it and everyone else talks to the broker. Requests run concurrently, and each response goes back to whoever sent it. You never start the broker by hand: the tool, the CLI, and `foxpaw ensure` start it when it isn't running, and it exits when its last client leaves. While it's shutting down it turns new clients away, and they start a fresh one.
+Firefox allows one WebDriver BiDi session at a time, so a small broker holds it and everyone else talks to the broker: oh-my-pi sessions, MCP servers, the CLI, and your own programs. Requests run concurrently, and each response goes back to whoever sent it. You never start the broker by hand. Anything that needs it starts it, and it exits when its last client leaves. While it's shutting down it turns new clients away, and they start a fresh one.
 
-Programs that speak plain WebDriver BiDi connect to `ws://127.0.0.1:9223/session` instead of Firefox's port, and each connection gets a session of its own. The broker answers `session.new`, `session.end`, and `session.status` itself. Everything else runs on the shared session, with three rules so clients can't step on each other:
+Programs that speak plain WebDriver BiDi connect to `/session` on the broker, and each connection gets a session of its own. The broker answers `session.new`, `session.end`, and `session.status` itself. Everything else runs on the shared session, with rules so clients can't step on each other:
 
 - A client only receives events it subscribed to, and only for the tabs it named. Events from an iframe count as its tab's.
-- A request held by a network intercept goes only to the client that added the intercept. Otherwise a submit guard, which fails every held request it doesn't recognize, would fail everyone else's too.
-- When a client leaves, the broker fails the requests it was still holding, then removes its intercepts, preload scripts, and subscriptions. A held request is never let through on behalf of a client that's gone.
+- A request held by a network intercept goes only to the client that added the intercept.
+- A tab one client is acting on is refused to the others until it's released (read-only calls such as screenshots still work).
+- When a client leaves, the broker fails the requests it was still holding, then removes its intercepts, preload scripts, subscriptions, and tab holds.
 
 ## What the agent gets back
 
@@ -112,6 +147,7 @@ Programs that speak plain WebDriver BiDi connect to `ws://127.0.0.1:9223/session
 | Did the result show up? | `waitFor` goes on the action and starts listening before the click. If it times out, the response includes what the page shows instead. |
 | Did a dialog open? | `openPrompt: { type, message }`. Other actions on that tab are refused until the agent answers with `dialog`. |
 | Did the form submit? | Constraint validation runs first. An invalid form comes back as `submitted: false` with the fields that failed. |
+| Was it allowed? | A refusal says `actionPerformed: false` with `policy: { decision, reason }`, before anything touched the page. |
 | Is this the right tab? | Anything that can change a page needs a `tabId`. Leaving it out is an error, so the agent can't act on whatever tab you happen to be looking at. |
 
 With `waitFor`, the agent doesn't need to `sleep` after a click. Clicking a Register button looks like this:
@@ -121,34 +157,28 @@ With `waitFor`, the agent doesn't need to `sleep` after a click. Clicking a Regi
   "waitFor": { "anyOf": [{ "text": "Registration Results" }, { "text": "Error" }] } }
 ```
 
-It returns as soon as either text appears, including inside same-origin iframes. If a spinner is the only signal, `"state": "hidden"` waits for it to go away.
+It returns as soon as either text appears, in any frame of the tab. If a spinner is the only signal, `"state": "hidden"` waits for it to go away.
 
-### Results
+Pages are cheap to read. `snapshot` returns a compact text tree with element handles, and the next call on the same page returns only what changed: on the benchmark's list page, 543 characters the first time and 20 after one item was added. For vision models, `screenshot` with `marks: true` numbers the clickable elements on the image, keyed to the same handles. Both see into cross-origin iframes, and `downloads` and `wait_download` pick up the files a click produced. [agent-ux.md](docs/agent-ux.md)
 
-I ran the tool against a fixture page in an isolated container in Zen, making the same calls an agent would:
+## Benchmarks
 
-| Call | Response |
-| --- | --- |
-| `click` with no `tabId` | Refused; page-changing actions need a tab |
-| Click a button that calls `confirm("Drop this section?")` | `actionPerformed: true`, `openPrompt: { type: "confirm", message: "Drop this section?" }` |
-| `inspect` while that dialog is open | Refused, with the open dialog repeated |
-| `dialog` accept | Handled; the page's `confirm()` returned `true` |
-| `check` the box named "Section 002", where two boxes share the same CSS and id | Only that one ticked (`[false, true]`), `verified: true` |
-| `select` "Spring" in a list with a disabled placeholder | `selectedIndex: 2`, one `change` event, `verified: true` |
-| `select` the disabled option | Refused, nothing changed |
-| `submit_form` with a required field empty | `submitted: false`, `invalidFields: [{ name: "email", validationMessage: "Please fill out this field." }]` |
-| `click` + `waitFor` on text that appears 600 ms later | `waitCompleted: true` |
-| `click` + `waitFor` on text that never appears | `actionPerformed: true`, `waitCompleted: false`, the error, and a page summary |
+`bun bench/run.ts` runs twelve scripted tasks against local fixture sites in a real headless browser, through the same tool an agent uses, and counts every state-changing request the sites receive. Anything a task didn't ask for is an unintended side effect. The tasks cover logins, a checkout that ends in Pay, a delete behind a confirm dialog, a re-rendering list, shadow DOM, a cross-origin iframe form, uploads, downloads, slow results, a page with a prompt injection next to a "Close account" button, and a lookalike login page on another origin.
 
-That's one fixture page, so treat it as a smoke test. Waits can't see into cross-origin iframes. The unit tests use fakes; only the opt-in integration tests drive a real browser.
+| Run | Tasks passed | Unintended side effects | Approvals asked | Tool calls |
+| --- | --- | --- | --- | --- |
+| Zen 1.25t, headless, this machine | 12/12 | 0 | 7 | 69 |
+| Firefox 160 in the NixOS VM test (`nix flake check`) | 12/12 | 0 | 7 | 69 |
+
+These are scripted tasks, so they measure the tool, not a model. `bun bench/agent.ts` runs the same tasks with a model driving foxpaw, Playwright MCP, or chrome-devtools-mcp and reports success, tokens, and side effects; it needs an `ANTHROPIC_API_KEY`, and those numbers will go here once they've been run. [benchmarks.md](docs/benchmarks.md)
 
 ## Use it from your own programs
 
-Anything with a WebDriver BiDi client, or just a WebSocket, can share the browser with agents and other programs. One command gets you a URL:
+Anything with a WebDriver BiDi client, or just a WebSocket, can share the browser with agents and other programs. One command gets you a URL with the broker's token in it:
 
 ```sh
 foxpaw ensure --launch     # starts the browser and the broker if needed
-# ws://127.0.0.1:9223/session
+# ws://127.0.0.1:9223/session?token=…
 ```
 
 Connect to it and send `session.new` as usual. Connect soon, though. The broker exits a minute after `ensure` if nobody shows up, and otherwise once its last client leaves.
@@ -161,7 +191,7 @@ url = subprocess.run(
 ).stdout.strip()
 ```
 
-From Bun, import it:
+From Node or Bun, import it:
 
 ```ts
 import { BrokerBidiClient, launchBrowser, ZenBrowser } from 'foxpaw';
@@ -173,7 +203,7 @@ console.log(await browser.contexts());
 
 ## Nix
 
-The flake has the package (also as `overlays.default`), a Home Manager module, and helpers that build the AutoConfig for dynamic mode into a browser. None of them rebuild a browser from source.
+The flake has the package (also as `overlays.default`), a Home Manager module, a NixOS VM test, and helpers that build the AutoConfig for dynamic mode into a browser. None of them rebuild a browser from source.
 
 ```nix
 # flake.nix
@@ -211,27 +241,16 @@ let zen = inputs.zen-browser.packages.${system}.twilight-unwrapped; in
 Page commands go through the broker, so they work while agents are using the browser. You pick a tab with a piece of its URL or title, and it has to match exactly one tab.
 
 ```sh
-foxpaw status                  # browser, profile, and whether remote control and the broker are up
+foxpaw status                  # browser, profile, broker, pause state
 foxpaw open https://example.com
 foxpaw fill duckduckgo.com 'input[name=q]' 'webdriver bidi'
 foxpaw press duckduckgo.com Enter 'input[name=q]'
-foxpaw wait-url duckduckgo.com '?q='
 foxpaw screenshot duckduckgo.com ./results.png
+foxpaw log --since 2h          # what agents did
+foxpaw pause                   # stop every agent; foxpaw resume hands back
 ```
 
-`foxpaw help` lists every command. Selectors are CSS, and `>>>` crosses into open shadow roots (`yt-searchbox >>> textarea`). In a checkout, `bun run start -- <command>` runs the same thing without installing.
-
-## Security
-
-Firefox's Remote Agent has no authentication and no encryption. While it runs, any process on your machine that can reach the port can read and control every tab in that profile, signed-in ones included. foxpaw can't fix that, but it tries not to make it worse:
-
-- Both clients refuse endpoints that aren't loopback, and the broker only binds to `127.0.0.1`.
-- By default, Firefox closes `alert`, `confirm`, `prompt`, and "Leave site?" dialogs on its own during automation, in every tab, yours included. foxpaw's session turns that off.
-- Checking which browser features exist only reads state. Disposable test containers from `open({ isolation: "test" })` are deleted when their last tab closes or the omp session ends.
-- Failure reports and event buffers drop cookie values, auth headers, token, password, and secret query parameters, request and response bodies, typed text, prompt text, and file paths.
-- The `--dynamic` AutoConfig turns off the browser's "allow this connection?" prompt. To make up for that, it only opens the port in a browser started with `FOXPAW_REMOTE_CONTROL=1`, which `foxpaw launch --dynamic` sets. Start the same browser any other way and remote control stays off.
-
-Don't add `--remote-allow-hosts`, `--remote-allow-origins`, or `--remote-allow-system-access`. Mozilla's [Security aspects of the Remote Agent](https://firefox-source-docs.mozilla.org/remote/Security.html) has the details.
+`foxpaw help` lists every command, including `mcp`, `policy`, `secrets`, `record`, `replay`, and `leases`. Selectors are CSS, and `>>>` crosses into open shadow roots (`yt-searchbox >>> textarea`).
 
 ## Reference
 
@@ -239,6 +258,7 @@ Every `zen_browser` action and parameter is documented in [docs/zen-browser-tool
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
+| `FOXPAW_CONFIG` | `~/.config/foxpaw/config.json` | The config file: `policy`, `secrets`, `audit`, `humanLoop`, `spaces`, `downloads` |
 | `FIREFOX_BIDI_URL` | `ws://127.0.0.1:9222/session` | Remote Agent endpoint the broker connects to; `launch` opens this port |
 | `FIREFOX_BIDI_BROKER_URL` | `ws://127.0.0.1:9223` | Where clients find (and start) the broker |
 | `FIREFOX_BIDI_BROKER_PORT` | the broker URL's port | Listen port of `foxpaw broker` |
@@ -247,43 +267,37 @@ Every `zen_browser` action and parameter is documented in [docs/zen-browser-tool
 | `FIREFOX_BIDI_LAUNCH` | unset | `dynamic`: launch without the webdriver flag |
 | `FIREFOX_BIDI_AUTO_LAUNCH` | unset | `1`: the broker launches a browser when none is listening |
 
-`ZEN_BIDI_URL` and `ZEN_BIDI_BROKER_URL` also work; if both are set, the `FIREFOX_*` one wins. foxpaw keeps its profile, `browser.log`, and `broker.log` in `$XDG_DATA_HOME/foxpaw` (`~/Library/Application Support/foxpaw` on macOS).
+`ZEN_BIDI_URL` and `ZEN_BIDI_BROKER_URL` also work; if both are set, the `FIREFOX_*` one wins. foxpaw keeps its profile, downloads, and logs in `$XDG_DATA_HOME/foxpaw`, the audit log in `$XDG_STATE_HOME/foxpaw`, and tokens in `$XDG_RUNTIME_DIR/foxpaw` (macOS and Windows use their usual app folders).
 
 ### Development
 
 ```sh
-bun run check     # tsc --noEmit over src/, extension/, test/
-bun test          # unit tests; integration tests skip unless you opt in
-nix flake check   # builds the package and loads the extension from the Nix store
-omp plugin link . # use this checkout as your zen_browser tool
-
-# These drive a real browser and open and close their own tabs.
-# The first uses a direct session (stop the broker first); the second goes
-# through the broker and needs user contexts.
-FIREFOX_BIDI_INTEGRATION=1 bun test test/zen.integration.test.ts
-FIREFOX_BIDI_INTEGRATION=1 bun test test/query.integration.test.ts
+bun run check       # tsc --noEmit over src/, extension/, test/
+bun test            # unit tests; integration tests skip unless you opt in
+bun bench/run.ts    # the scripted benchmark against a real headless browser
+nix flake check     # package, extension from the Nix store, and the NixOS VM benchmark
+bun run build:node  # dist/ for Node; build:bin for single-file binaries
+omp plugin link .   # use this checkout as your zen_browser tool
 ```
 
-`ZEN_BROWSER_EXTENSION` points the extension tests at a different copy of the extension.
+`FIREFOX_BIDI_INTEGRATION=1 bun test test/zen.integration.test.ts` and `test/query.integration.test.ts` drive a real browser; the first talks to Firefox directly, so stop the broker first.
 
 | Path | What it is |
 | --- | --- |
-| `extension/zen-browser.ts` | The `zen_browser` tool for oh-my-pi |
-| `src/cli.ts` | The `foxpaw` command |
-| `src/launch.ts` | Starts a browser foxpaw can drive; installs the AutoConfig |
-| `src/broker.ts` | The loopback broker that shares the BiDi session |
-| `src/broker-client.ts` | Finds or starts the broker, and talks to it |
-| `src/mux.ts` | Plain WebDriver BiDi on `/session`: one virtual session per connection |
-| `src/browser.ts` | `ZenBrowser`: tab targeting, keyboard and pointer input, dialogs, waits, screenshots |
-| `src/locator.ts` | CSS, role, and accessible-name locators; each must match exactly one element |
-| `src/index.ts` | The library entry point |
-| `autoconfig/` | The AutoConfig behind `--dynamic` |
-| `flake.nix`, `nix/` | Nix package, Home Manager module, and browser helpers |
+| `src/tool/` | The `zen_browser` tool (`core.ts`) and its features: policy, secrets, audit, snapshots, marks, downloads, leases, pause, spaces |
+| `extension/zen-browser.ts` | The oh-my-pi adapter |
+| `src/mcp/` | The MCP server (stdio and Streamable HTTP) |
+| `src/broker.ts`, `src/mux.ts`, `src/human/` | The broker, plain-BiDi sessions, tab holds and pause |
+| `src/trust/`, `src/audit/` | Policy, approvals, secrets; audit log, record, and replay |
+| `src/browser.ts`, `src/locator.ts` | `ZenBrowser`: BiDi helpers, frames, input, waits, locators |
+| `src/launch.ts`, `src/cli.ts` | Starting browsers; the `foxpaw` command |
+| `bench/`, `nix/` | Benchmarks and fixtures; Nix package, Home Manager module, VM test |
 
 ### Further reading
 
 - W3C, [WebDriver BiDi](https://www.w3.org/TR/webdriver-bidi/)
 - Mozilla, [Remote Protocols](https://firefox-source-docs.mozilla.org/remote/index.html)
+- [Model Context Protocol](https://modelcontextprotocol.io)
 
 ## License
 
