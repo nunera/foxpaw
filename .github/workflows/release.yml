@@ -1,0 +1,55 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions: {}
+
+jobs:
+  binaries:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+      - name: Tag matches package.json version
+        run: test "v$(jq -r .version package.json)" = "$GITHUB_REF_NAME"
+      - run: bun install --frozen-lockfile
+      - run: bun run build:bin
+      - name: Smoke test linux-x64
+        run: dist/bin/foxpaw-linux-x64 help
+      - name: Checksums
+        working-directory: dist/bin
+        run: sha256sum foxpaw-* > SHA256SUMS
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/bin/* --verify-tag --generate-notes --title "$GITHUB_REF_NAME"
+
+  npm:
+    needs: binaries
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+    steps:
+      - name: Skip without NPM_TOKEN
+        if: env.NODE_AUTH_TOKEN == ''
+        run: echo "::notice::NPM_TOKEN is not set; skipping npm publish"
+      - if: env.NODE_AUTH_TOKEN != ''
+        uses: actions/checkout@v7
+      - if: env.NODE_AUTH_TOKEN != ''
+        uses: oven-sh/setup-bun@v2
+      - if: env.NODE_AUTH_TOKEN != ''
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - if: env.NODE_AUTH_TOKEN != ''
+        run: bun install --frozen-lockfile
+      - if: env.NODE_AUTH_TOKEN != ''
+        run: npm publish --provenance --access public

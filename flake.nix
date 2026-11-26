@@ -34,7 +34,7 @@
       checks = forAllSystems (pkgs: { foxpaw = self.packages.${pkgs.stdenv.hostPlatform.system}.default; });
 
       devShells = forAllSystems (pkgs: {
-        default = pkgs.mkShell { packages = [ pkgs.bun pkgs.typescript ]; };
+        default = pkgs.mkShell { packages = [ pkgs.bun pkgs.nodejs_22 pkgs.typescript ]; };
       });
     };
 }

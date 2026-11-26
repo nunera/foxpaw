@@ -9,17 +9,22 @@
   },
   "type": "module",
   "bin": {
-    "foxpaw": "src/cli.ts"
+    "foxpaw": "dist/cli.js"
   },
+  "types": "./dist/index.d.ts",
   "exports": {
-    ".": "./src/index.ts",
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
     "./extension": "./extension/zen-browser.ts"
   },
-  "files": ["src", "extension", "autoconfig"],
+  "files": ["dist", "!dist/bin", "src", "extension", "autoconfig"],
   "omp": {
     "extensions": ["extension/zen-browser.ts"]
   },
   "engines": {
+    "node": ">=22",
     "bun": ">=1.1"
   },
   "scripts": {
@@ -27,7 +32,10 @@
     "test": "bun test",
     "start": "bun run src/cli.ts",
     "broker": "bun run src/cli.ts broker",
-    "build": "bun build --compile src/cli.ts --outfile dist/foxpaw"
+    "build:node": "bun scripts/build-node.ts && tsc -p scripts/tsconfig.types.json",
+    "build:bin": "bun scripts/build-bin.ts",
+    "prepare": "bun scripts/build-node.ts",
+    "prepack": "tsc -p scripts/tsconfig.types.json"
   },
   "devDependencies": {
     "@types/bun": "latest",
