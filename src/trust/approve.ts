@@ -123,24 +123,49 @@ const OVERLAY_SANDBOX = 'foxpaw-approval';
  * An overlay in the tab: a closed shadow root in a page-invisible sandbox, top layer, re-asserted every 200 ms, and
  * only trusted clicks (not before 600 ms, and only when the overlay is topmost at the click point) count. The page
  * still controls everything around it, so this is weaker than a desktop prompt.
+ *
+ * BiDi input (`input.performActions`) produces trusted events, so an agent could click Approve itself. While the
+ * overlay is open the broker is paused (when nothing else paused it): every client's input, navigation, and script
+ * commands are held, so only a person at the keyboard and mouse can answer it.
  */
-export function browserApprover(bidi: Pick<BidiTransport, 'command'>, contextId: string | undefined): Approver {
+export function browserApprover(bidi: ApprovalTransport, contextId: string | undefined): Approver {
   return {
     name: 'browser',
     available: async () => contextId !== undefined,
     ask: async (request, signal) => {
       const target = { context: contextId!, sandbox: OVERLAY_SANDBOX };
-      const cancel = () => void bidi.command('script.evaluate', { expression: 'globalThis.__foxpawCancel?.()', target, awaitPromise: false }).catch(() => undefined);
+      let held = false;
+      const release = async () => {
+        if (!held) return;
+        held = false;
+        await bidi.request?.('resume').catch(() => undefined);
+      };
+      // Cancelling evaluates a script, which the pause would hold: release the hold first.
+      const cancel = () => void release().then(() => bidi.command('script.evaluate', { expression: 'globalThis.__foxpawCancel?.()', target, awaitPromise: false })).catch(() => undefined);
       signal.addEventListener('abort', cancel, { once: true });
       try {
-        const result = await bidi.command('script.evaluate', { expression: overlayScript(promptText(request)), target, awaitPromise: true }, request.timeoutMs + 5000);
+        const evaluation = bidi.command('script.evaluate', { expression: overlayScript(promptText(request)), target, awaitPromise: true }, request.timeoutMs + 5000);
+        if (bidi.request) {
+          const before = await bidi.request('pauseState');
+          if (before.paused !== true) {
+            // Marked first: an abort that lands while the pause is on its way must still release it.
+            held = true;
+            await bidi.request('pause', { owner: 'foxpaw approval prompt' });
+          }
+        }
+        const result = await evaluation;
         const remote = result.result;
         const value = remote && typeof remote === 'object' && !Array.isArray(remote) && 'value' in remote ? remote.value : undefined;
         return result.type === 'success' && value === 'approve' && !signal.aborted;
-      } finally { signal.removeEventListener('abort', cancel); }
+      } finally {
+        signal.removeEventListener('abort', cancel);
+        await release();
+      }
     },
   };
 }
+/** The tab's transport; `request` (the broker envelope) is there when a broker is in between, and pauses it. */
+export type ApprovalTransport = Pick<BidiTransport, 'command'> & { request?(kind: string, payload?: Record<string, unknown>): Promise<Record<string, unknown>> };
 
 function overlayScript(text: string): string {
   return `(async () => {
@@ -181,7 +206,7 @@ export type ApprovalDeps = {
   run?: Runner;
   platform?: NodeJS.Platform;
   /** The tab's BiDi transport and context, for `browser`. */
-  page?: { bidi: Pick<BidiTransport, 'command'>; contextId?: string };
+  page?: { bidi: ApprovalTransport; contextId?: string };
   /** Replaces the approver list entirely (tests). */
   approvers?: Approver[];
 };

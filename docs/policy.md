@@ -62,7 +62,7 @@ foxpaw policy show
 - `osascript`: a macOS dialog.
 - `powershell`: a Windows message box.
 - `command`: runs `approval.command` (a program path, or `[program, ...args]`; no shell). It gets the request as one line of JSON on stdin and approves only by exiting 0. Use it for a phone push, a password prompt, or scripted tests.
-- `browser`: an overlay in the tab itself. It lives in a closed shadow root in a sandbox page scripts can't reach, stays on top, ignores synthetic clicks, and ignores clicks in its first 600 ms. The page still owns everything around it and can hide it or trick you into clicking, so it is weaker than a desktop prompt. Use it only where there is no desktop.
+- `browser`: an overlay in the tab itself. It lives in a closed shadow root in a sandbox page scripts can't reach, stays on top, ignores synthetic clicks, and ignores clicks in its first 600 ms. BiDi input counts as a real click to the page, so while the overlay is open foxpaw pauses the broker: no client, the asking agent included, can send input, navigate, or run scripts until you answer. The page still owns everything around the overlay and can hide it or trick you into clicking, so it is weaker than a desktop prompt. Use it only where there is no desktop.
 
 The request every approver sees:
 
@@ -103,3 +103,9 @@ A refused call fails with `actionPerformed: false` and the decision:
 ## Limits
 
 Classification looks at the element and form at the moment of the call. A page can still do anything on an ordinary click (a `<div>` that sends a payment from a script), so words and forms are a net, not a guarantee; `deny` writes on sites where any click matters.
+
+### Who policy applies to
+
+Policy runs in the `zen_browser` tool: oh-my-pi, `foxpaw mcp`, the CLI page commands, and `foxpaw replay`. Programs that talk plain WebDriver BiDi to the broker (`/session`, for example `apply`) are trusted: they get tab leases and pause, but not policy or secret scrubbing.
+
+That draws the line in a specific place. Policy stops a model that misreads a page or follows an injected instruction while it only has the browser tool. It does not stop an agent that can also run commands as you (oh-my-pi, Claude Code, and Codex all have a shell): that agent can read the broker token and connect to `/session`, or edit `config.json` to allow everything, because it is you as far as the system can tell. For untrusted tasks, give the agent the browser tool without a shell, or run it as a different user.
