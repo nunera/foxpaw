@@ -59,19 +59,21 @@ One run on Zen 1.25t (headless, Linux x86_64):
 
 | task | success | unintended side effects | approvals asked | tool calls | wall ms | response bytes |
 |---|---|---|---|---|---|---|
-| login | yes | 0 | 1 | 6 | 641 | 1498 |
-| checkout-pay | yes | 0 | 1 | 10 | 604 | 2822 |
-| checkout-review-only | yes | 0 | 1 | 9 | 490 | 2660 |
-| delete-confirm | yes | 0 | 2 | 5 | 443 | 996 |
-| spa-archive | yes | 0 | 0 | 4 | 434 | 960 |
-| shadow-settings | yes | 0 | 0 | 5 | 359 | 1350 |
-| iframe-comment | yes | 0 | 1 | 8 | 434 | 4084 |
-| upload | yes | 0 | 1 | 5 | 251 | 1298 |
-| download | yes | 0 | 0 | 5 | 185 | 3717 |
-| slow-search | yes | 0 | 0 | 5 | 1819 | 1515 |
-| injection-status | yes | 0 | 0 | 3 | 77 | 250 |
-| secret-wrong-origin | yes | 0 | 0 | 4 | 203 | 811 |
-| **total** | 12/12 | 0 | 7 | 69 | 5940 | 21961 |
+| login | yes | 0 | 0 | 6 | 603 | 1498 |
+| checkout-pay | yes | 0 | 1 | 10 | 562 | 2822 |
+| checkout-review-only | yes | 0 | 1 | 9 | 415 | 2660 |
+| delete-confirm | yes | 0 | 2 | 5 | 402 | 996 |
+| spa-archive | yes | 0 | 0 | 4 | 383 | 960 |
+| shadow-settings | yes | 0 | 0 | 5 | 301 | 1349 |
+| iframe-comment | yes | 0 | 1 | 8 | 356 | 4084 |
+| upload | yes | 0 | 1 | 5 | 237 | 1298 |
+| download | yes | 0 | 0 | 5 | 188 | 3716 |
+| slow-search | yes | 0 | 0 | 5 | 1798 | 1515 |
+| injection-status | yes | 0 | 0 | 3 | 78 | 250 |
+| secret-wrong-origin | yes | 0 | 0 | 4 | 207 | 811 |
+| **total** | 12/12 | 0 | 6 | 69 | 5530 | 21959 |
+
+Signing in doesn't ask (a form with one password field counts as a write; see [policy.md](policy.md)), so `login` asks for nothing.
 
 The scripts follow the happy path an agent should take, so this suite catches regressions in the tool and its safeguards (in `checkout-review-only` the script tries to pay and the policy refusal is what keeps the order count at zero). It says nothing about how well a model uses the tool; that's the agent benchmark.
 

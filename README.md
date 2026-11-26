@@ -101,7 +101,7 @@ If a package manager owns the browser (Nix, Flatpak, a distro package), that dir
 
 Everything here is on by default except where it says otherwise, and it applies the same way in every host, because it lives in the tool rather than in a host's settings. One JSON file, `~/.config/foxpaw/config.json`, configures all of it.
 
-**Per-site policy.** Every call is a read, a write, or irreversible: submitting a form, paying, deleting, sending, `evaluate`, or clicking a button whose label says so. Each site gets `allow`, `ask`, or `deny` per class. With no config, irreversible actions ask. Asking means a desktop prompt with Approve and Deny (a notification on Linux, a dialog on macOS and Windows); no answer within two minutes is a no.
+**Per-site policy.** Every call is a read, a write, or irreversible: submitting a form, paying, deleting, sending, `evaluate`, or clicking a button whose label says so. Signing in is a write, so logins don't ask every time. Each site gets `allow`, `ask`, or `deny` per class. With no config, irreversible actions ask. Asking means a desktop prompt with Approve and Deny (a notification on Linux, a dialog on macOS and Windows); no answer within two minutes is a no.
 
 ```json
 {
@@ -124,7 +124,7 @@ Targets inside an iframe are judged by the iframe's site too, and the stricter r
 
 Don't add `--remote-allow-hosts`, `--remote-allow-origins`, or `--remote-allow-system-access`. Mozilla's [Security aspects of the Remote Agent](https://firefox-source-docs.mozilla.org/remote/Security.html) has the details.
 
-**Where the line is.** Policy, secrets, and the audit log live in the `zen_browser` tool. They stop a model that misreads a page or follows an injected instruction while all it has is the browser. They don't stop an agent that can also run shell commands as you, and most coding agents can: it can read the token and talk to the broker directly, or edit the config to allow everything. Programs that use the broker's plain BiDi endpoint are trusted the same way. For tasks you don't trust, give the agent the browser tool without a shell. [policy.md](docs/policy.md#who-policy-applies-to) has the details.
+**Where the line is.** Policy, secrets, and the audit log live in the `zen_browser` tool. They stop a model that misreads a page or follows an injected instruction while all it has is the browser. They don't stop an agent that can also run shell commands as you, and most coding agents can: it can read the token and talk to the broker directly, or edit the config to allow everything. Programs that use the broker's plain BiDi endpoint are trusted the same way. For tasks you don't trust, give the agent the browser tool and nothing else: [lockdown.md](docs/lockdown.md) has the exact flags for Claude Code, Codex, and oh-my-pi.
 
 ## How it works
 
@@ -171,8 +171,8 @@ Pages are cheap to read. `snapshot` returns a compact text tree with element han
 
 | Run | Tasks passed | Unintended side effects | Approvals asked | Tool calls |
 | --- | --- | --- | --- | --- |
-| Zen 1.25t (Twilight), headless, Linux | 12/12 | 0 | 7 | 69 |
-| Firefox 160 in the NixOS VM test (`nix flake check`) | 12/12 | 0 | 7 | 69 |
+| Zen 1.25t (Twilight), headless, Linux | 12/12 | 0 | 6 | 69 |
+| Firefox 160 in the NixOS VM test (`nix flake check`) | 12/12 | 0 | 6 | 69 |
 
 These are scripted tasks, so they measure the tool, not a model. `bun bench/agent.ts` runs the same tasks with a model driving foxpaw, Playwright MCP, or chrome-devtools-mcp and reports success, tokens, and side effects; it needs an `ANTHROPIC_API_KEY`, and those numbers will go here once they've been run. [benchmarks.md](docs/benchmarks.md)
 
