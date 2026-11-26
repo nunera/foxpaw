@@ -63,3 +63,46 @@ test('auto tries the configured command first, then the desktop prompt for the p
   expect(result).toMatchObject({ approved: false, approver: 'none' });
   expect(result.reason).toContain('notify-send');
 });
+
+/** A broker-backed transport: records commands and broker requests in order; the overlay answers when told to. */
+function fakeBroker() {
+  const log: string[] = [];
+  const overlay = Promise.withResolvers<Record<string, unknown>>();
+  let paused = false;
+  const bidi = {
+    command: async (method: string, params: Record<string, unknown> = {}) => {
+      const expression = String(params.expression ?? '');
+      log.push(`${method}${expression.includes('__foxpawCancel?.()') ? ':cancel' : ''}${paused ? ' (while paused)' : ''}`);
+      if (expression.includes('__foxpawCancel?.()')) { overlay.resolve({ type: 'success', result: { type: 'string', value: 'deny' } }); return {}; }
+      return await overlay.promise;
+    },
+    request: async (kind: string) => {
+      log.push(kind);
+      if (kind === 'pause') paused = true;
+      if (kind === 'resume') paused = false;
+      return { paused };
+    },
+  };
+  return { bidi, log, answer: (value: string) => overlay.resolve({ type: 'success', result: { type: 'string', value } }), isPaused: () => paused };
+}
+
+test('the in-tab overlay holds every client\'s input until a person answers, then releases it', async () => {
+  const { bidi, log, answer, isPaused } = fakeBroker();
+  const asked = approversFor(approval({ method: 'browser' }), { page: { bidi, contextId: 'ctx' } })[0]!.ask(request, new AbortController().signal);
+  for (let i = 0; i < 50 && !isPaused(); i++) await Promise.resolve();
+  // An agent's own BiDi click would be trusted; the broker is paused while the overlay waits.
+  expect(isPaused()).toBe(true);
+  answer('approve');
+  expect(await asked).toBe(true);
+  expect(log).toEqual(['script.evaluate', 'pauseState', 'pause', 'resume']);
+});
+
+test('a timed-out overlay releases the hold before cancelling, so the cancel is not itself held', async () => {
+  const { bidi, log, isPaused } = fakeBroker();
+  const abort = new AbortController();
+  const asked = approversFor(approval({ method: 'browser' }), { page: { bidi, contextId: 'ctx' } })[0]!.ask(request, abort.signal);
+  for (let i = 0; i < 50 && !isPaused(); i++) await Promise.resolve();
+  abort.abort();
+  expect(await asked).toBe(false);
+  expect(log).toEqual(['script.evaluate', 'pauseState', 'pause', 'resume', 'script.evaluate:cancel']);
+});
