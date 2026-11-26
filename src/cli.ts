@@ -20,8 +20,13 @@ import { humanLoopStatus, leasesCommand, pauseCommand, resumeCommand } from './h
 const COMMANDS: Record<string, (args: string[]) => Promise<void>> = {
   launch: async (args) => print(await launchBrowser(launchOptions(args))),
   ensure: async (args) => {
-    if (args.includes('--launch')) await launchBrowser(launchOptions(args.filter((arg) => arg !== '--launch')));
-    console.log((await ensureBroker(firefoxBidiBrokerUrl())).sessionUrl);
+    const json = args.includes('--json');
+    const rest = args.filter((arg) => arg !== '--launch' && arg !== '--json');
+    if (args.includes('--launch')) await launchBrowser(launchOptions(rest));
+    const endpoint = await ensureBroker(firefoxBidiBrokerUrl());
+    // --json keeps the token out of the URL, for clients that can send `Authorization: Bearer` (preferred).
+    if (json) print({ url: brokerSessionUrl(), token: endpoint.token ?? null, authorization: endpoint.token ? `Bearer ${endpoint.token}` : null });
+    else console.log(endpoint.sessionUrl);
   },
   broker: async () => { await runBroker(); },
   mcp: runMcp,
@@ -149,9 +154,11 @@ Setup:
                       Start a Zen or Firefox foxpaw can drive, next to your everyday browser.
                       Default profile: ${defaultProfileDir()}. --dynamic starts remote control
                       from inside the browser (needs the AutoConfig), so pages don't see navigator.webdriver.
-  ensure [--launch ...]
-                      Start the broker if needed and print its plain WebDriver BiDi URL
-                      (${brokerSessionUrl()}). --launch also starts the browser (takes launch's options).
+  ensure [--launch ...] [--json]
+                      Start the broker if needed and print its plain WebDriver BiDi URL with the token
+                      (${brokerSessionUrl()}?token=…). --json prints the URL and the token separately,
+                      for clients that can send it as Authorization: Bearer (keeps it out of URLs).
+                      --launch also starts the browser (takes launch's options).
   broker              Run the broker in the foreground.
   mcp [--http [--port N]]
                       Serve the zen_browser tool to MCP hosts over stdio, or Streamable HTTP on

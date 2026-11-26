@@ -49,7 +49,7 @@ Install the `foxpaw` command whichever way you already install things ([all rout
 | Nix | `nix profile install github:nunera/foxpaw`, or [the flake](#nix) |
 | neither | a binary from [Releases](https://github.com/nunera/foxpaw/releases), with its runtime inside |
 
-foxpaw isn't on the npm registry: an unrelated package owns the name `foxpaw` there, so always install from `github:nunera/foxpaw`.
+foxpaw isn't on npm yet. It will be published as `@nunera/foxpaw`; the unscoped name `foxpaw` there belongs to an unrelated package, so don't install that. Until then, install from `github:nunera/foxpaw`.
 
 Then give your agent the `zen_browser` tool:
 
@@ -122,7 +122,9 @@ Targets inside an iframe are judged by the iframe's site too, and the stricter r
 
 **The connection.** Firefox's remote control has no authentication, so foxpaw keeps it to this machine and adds what it can on top. The broker and the MCP HTTP server bind to 127.0.0.1 only, refuse any request a web page could send (anything with an `Origin` header, or a `Host` that isn't loopback, which is what DNS rebinding uses), and require a token that's new each time they start and readable only by you (`$XDG_RUNTIME_DIR/foxpaw/`). Page dialogs stay open instead of being dismissed for you, and event buffers drop cookies, auth headers, bodies, and typed text.
 
-Don't add `--remote-allow-hosts`, `--remote-allow-origins`, or `--remote-allow-system-access`. Mozilla's [Security aspects of the Remote Agent](https://firefox-source-docs.mozilla.org/remote/Security.html) has the details. One honest limit: a program running as you can read your token, just as it can read your browser profile. foxpaw protects you from web pages and from other users, not from your own malware.
+Don't add `--remote-allow-hosts`, `--remote-allow-origins`, or `--remote-allow-system-access`. Mozilla's [Security aspects of the Remote Agent](https://firefox-source-docs.mozilla.org/remote/Security.html) has the details.
+
+**Where the line is.** Policy, secrets, and the audit log live in the `zen_browser` tool. They stop a model that misreads a page or follows an injected instruction while all it has is the browser. They don't stop an agent that can also run shell commands as you, and most coding agents can: it can read the token and talk to the broker directly, or edit the config to allow everything. Programs that use the broker's plain BiDi endpoint are trusted the same way. For tasks you don't trust, give the agent the browser tool without a shell. [policy.md](docs/policy.md#who-policy-applies-to) has the details.
 
 ## How it works
 
@@ -185,6 +187,8 @@ foxpaw ensure --launch     # starts the browser and the broker if needed
 
 Connect to it and send `session.new` as usual. Connect soon, though. The broker exits a minute after `ensure` if nobody shows up, and otherwise once its last client leaves.
 
+A token in a URL tends to end up in logs and process lists. If your client can set headers, run `foxpaw ensure --json` instead: it prints the URL and the token separately, and you send the token as `Authorization: Bearer <token>`.
+
 From Python:
 
 ```python
@@ -196,7 +200,7 @@ url = subprocess.run(
 From Node or Bun, add it as a dependency (`bun add github:nunera/foxpaw`) and import it:
 
 ```ts
-import { BrokerBidiClient, launchBrowser, ZenBrowser } from 'foxpaw';
+import { BrokerBidiClient, launchBrowser, ZenBrowser } from '@nunera/foxpaw';
 
 await launchBrowser();
 const browser = new ZenBrowser(new BrokerBidiClient());   // starts the broker when needed

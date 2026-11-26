@@ -1,5 +1,5 @@
 {
-  "name": "foxpaw",
+  "name": "@nunera/foxpaw",
   "version": "0.3.0",
   "description": "Let an AI agent use a Zen or Firefox that's signed in to your accounts, safely: per-site policy, secrets the model never sees, audit log, MCP and oh-my-pi.",
   "license": "MIT",

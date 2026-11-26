@@ -152,7 +152,8 @@ export class BrokerBidiClient {
       const endpoint = this.options.start === false ? await runningBroker(this.url) : await ensureBroker(this.url, Math.max(1_000, deadline - Date.now()));
       if (!endpoint) throw new Error(`No foxpaw broker is running at ${this.url}.`);
       const { token } = endpoint;
-      const socket = new WebSocket(withToken(this.url, '/', token));
+      // A header rather than ?token=, so the token never sits in a URL (logs, error messages, process lists).
+      const socket = new WebSocket(new URL('/', this.url).toString(), token ? { headers: { Authorization: `Bearer ${token}` } } : {});
       this.#socket = socket;
       socket.on('message', (data, isBinary) => { if (!isBinary) this.#receive(data.toString()); });
       socket.on('close', () => { if (this.#socket === socket) this.#socket = undefined; });

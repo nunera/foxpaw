@@ -2,7 +2,7 @@
 
 foxpaw ships as an oh-my-pi plugin, a package you install from GitHub that runs on Node 22+ or Bun 1.1+, standalone binaries with Bun built in, and a Nix flake. All of them give you the same `foxpaw` command; the omp plugin also gives you the `zen_browser` tool.
 
-foxpaw isn't on the npm registry. The name `foxpaw` there belongs to an unrelated package, so `npm install foxpaw`, `bun add foxpaw`, `npx foxpaw`, and `omp plugin install foxpaw` install something else. Always install from `github:nunera/foxpaw`.
+foxpaw isn't on npm yet; releases will be published as `@nunera/foxpaw`. The unscoped name `foxpaw` on npm belongs to an unrelated package, so `npm install foxpaw`, `bun add foxpaw`, `npx foxpaw`, and `omp plugin install foxpaw` install something else. Until the first npm release, install from `github:nunera/foxpaw`.
 
 After installing, check it works:
 
