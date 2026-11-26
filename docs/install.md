@@ -1,8 +1,8 @@
 # Installing foxpaw
 
-foxpaw ships as an oh-my-pi plugin, a package you install from GitHub that runs on Node 22+ or Bun 1.1+, standalone binaries with Bun built in, and a Nix flake. All of them give you the same `foxpaw` command; the omp plugin also gives you the `zen_browser` tool.
+foxpaw ships as an oh-my-pi plugin, an npm package (`@nunera/foxpaw`) that runs on Node 22+ or Bun 1.1+, standalone binaries with Bun built in, and a Nix flake. All of them give you the same `foxpaw` command; the omp plugin also gives you the `zen_browser` tool.
 
-foxpaw isn't on npm yet; releases will be published as `@nunera/foxpaw`. The unscoped name `foxpaw` on npm belongs to an unrelated package, so `npm install foxpaw`, `bun add foxpaw`, `npx foxpaw`, and `omp plugin install foxpaw` install something else. Until the first npm release, install from `github:nunera/foxpaw`.
+The unscoped name `foxpaw` on npm belongs to an unrelated package, so `npm install foxpaw`, `bun add foxpaw`, `npx foxpaw`, and `omp plugin install foxpaw` install something else. Use `@nunera/foxpaw`.
 
 After installing, check it works:
 
@@ -20,26 +20,25 @@ omp runs the extension's TypeScript with its own Bun, so this needs nothing else
 
 ## npm and npx (Node 22+)
 
-From GitHub (the package builds `dist/` in its `prepare` script, so Bun must be on PATH):
-
 ```sh
-npx github:nunera/foxpaw help
+npm install -g @nunera/foxpaw
+npx @nunera/foxpaw help    # without installing
 ```
 
-`npm install -g github:nunera/foxpaw` doesn't work with npm 11: for a global git install whose package has a `prepare` script, npm links the package to a temporary clone it then deletes. Build a tarball and install that instead:
+To run the latest `main` instead of a release, install from GitHub. The package builds `dist/` in its `prepare` script, so Bun must be on PATH. `npm install -g github:nunera/foxpaw` doesn't work with npm 11 (it links the package to a temporary clone it then deletes), so build a tarball and install that:
 
 ```sh
 npm pack github:nunera/foxpaw
-npm install -g ./foxpaw-*.tgz
+npm install -g ./nunera-foxpaw-*.tgz
 ```
 
 ## Bun (1.1+)
 
 ```sh
-bun add -g --trust github:nunera/foxpaw
+bun add -g @nunera/foxpaw
 ```
 
-Bun doesn't run a git dependency's `prepare` script unless you trust it; without `--trust`, the `foxpaw` command is missing because `dist/` was never built.
+From GitHub instead: `bun add -g --trust github:nunera/foxpaw`. Bun doesn't run a git dependency's `prepare` script unless you trust it; without `--trust`, the `foxpaw` command is missing because `dist/` was never built.
 
 To use a checkout instead: `bun install` (it builds `dist/`), then `bun install -g "$PWD"`, or run it from source with `bun run start -- help`.
 

@@ -45,11 +45,12 @@ Install the `foxpaw` command whichever way you already install things ([all rout
 
 | You use | Run |
 | --- | --- |
-| Bun 1.1+ | `bun add -g --trust github:nunera/foxpaw` |
+| Node 22+ | `npm install -g @nunera/foxpaw` |
+| Bun 1.1+ | `bun add -g @nunera/foxpaw` |
 | Nix | `nix profile install github:nunera/foxpaw`, or [the flake](#nix) |
 | neither | a binary from [Releases](https://github.com/nunera/foxpaw/releases), with its runtime inside |
 
-foxpaw isn't on npm yet. It will be published as `@nunera/foxpaw`; the unscoped name `foxpaw` there belongs to an unrelated package, so don't install that. Until then, install from `github:nunera/foxpaw`.
+The npm package is `@nunera/foxpaw`. The unscoped name `foxpaw` there belongs to an unrelated package, so don't install that.
 
 Then give your agent the `zen_browser` tool:
 
