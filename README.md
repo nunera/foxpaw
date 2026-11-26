@@ -46,9 +46,9 @@ Install it whichever way you already install things:
 | You use | Run | You get |
 | --- | --- | --- |
 | oh-my-pi | `omp plugin install github:nunera/foxpaw` | the `zen_browser` tool (omp brings its own Bun) |
-| Bun 1.1+ | `bun install -g github:nunera/foxpaw` | the `foxpaw` command |
+| Bun 1.1+ | `bun add -g --trust github:nunera/foxpaw` | the `foxpaw` command |
 | Nix | `nix run github:nunera/foxpaw -- launch` | a one-off run; [install it properly](#nix) |
-| none of these | `bun run build` in a checkout | `dist/foxpaw`, one file with Bun inside |
+| none of these | a binary from [Releases](https://github.com/nunera/foxpaw/releases) | one file with its runtime inside |
 
 Then start a browser for it:
 
