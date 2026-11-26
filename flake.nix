@@ -31,7 +31,7 @@
 
       homeModules.default = import ./nix/home-manager.nix self;
 
-      checks = forAllSystems (pkgs: { foxpaw = self.packages.${pkgs.stdenv.hostPlatform.system}.default; });
+      checks = forAllSystems (pkgs: { foxpaw = self.packages.${pkgs.stdenv.hostPlatform.system}.default; } // nixpkgs.lib.optionalAttrs (pkgs.stdenv.hostPlatform.system == "x86_64-linux") { vm = import ./nix/tests/vm.nix { inherit pkgs; foxpaw = self.packages.x86_64-linux.foxpaw; src = ./.; }; });
 
       devShells = forAllSystems (pkgs: {
         default = pkgs.mkShell { packages = [ pkgs.bun pkgs.nodejs_22 pkgs.typescript ]; };
