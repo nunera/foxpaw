@@ -8,34 +8,28 @@ import { ZenBrowser } from './browser.ts';
 import { AUTOCONFIG, browserAppDir, defaultProfileDir, findBrowser, installAutoconfig, isListening, launchBrowser, profileLockOwner, type LaunchOptions } from './launch.ts';
 import { runBroker } from './broker.ts';
 
-const [command, ...args] = process.argv.slice(2);
+/**
+ * Setup and service commands. Each takes the arguments after its name. Features add theirs here (one entry each);
+ * anything not listed is a page command (see `page`).
+ */
+const COMMANDS: Record<string, (args: string[]) => Promise<void>> = {
+  launch: async (args) => print(await launchBrowser(launchOptions(args))),
+  ensure: async (args) => {
+    if (args.includes('--launch')) await launchBrowser(launchOptions(args.filter((arg) => arg !== '--launch')));
+    console.log((await ensureBroker(firefoxBidiBrokerUrl())).sessionUrl);
+  },
+  broker: async () => { await runBroker(); },
+  status: async () => print(await status()),
+  autoconfig: async (args) => autoconfig(args),
+  help: async () => console.log(usage()),
+};
+
+const [command = 'help', ...args] = process.argv.slice(2);
 
 try {
-  switch (command) {
-    case 'launch':
-      print(await launchBrowser(launchOptions(args)));
-      break;
-    case 'ensure': {
-      if (args.includes('--launch')) await launchBrowser(launchOptions(args.filter((arg) => arg !== '--launch')));
-      await ensureBroker(firefoxBidiBrokerUrl());
-      console.log(brokerSessionUrl());
-      break;
-    }
-    case 'broker':
-      runBroker();
-      break;
-    case 'status':
-      print(await status());
-      break;
-    case 'autoconfig':
-      autoconfig(args);
-      break;
-    case undefined: case 'help': case '--help': case '-h':
-      console.log(usage());
-      break;
-    default:
-      await page(command, args);
-  }
+  const run = COMMANDS[command === '--help' || command === '-h' ? 'help' : command];
+  if (run) await run(args);
+  else await page(command, args);
 } catch (error) {
   console.error(`foxpaw: ${error instanceof Error ? error.message : String(error)}`);
   process.exitCode = 1;

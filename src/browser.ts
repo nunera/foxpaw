@@ -1,3 +1,4 @@
+import { setTimeout as sleep } from 'node:timers/promises';
 import { type BidiTransport, type BidiEvent, type JsonObject } from './bidi.ts';
 import { detectCapabilities, type DetectedCapabilities } from './capabilities.ts';
 import { documentFrame, resolveLocator, semanticFunctions, type ElementIdentity, type FrameRef, type Locator, type ResolvedLocator } from './locator.ts';
@@ -342,7 +343,7 @@ export class ZenBrowser {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       if ((await documentFrame(this.evaluateValue.bind(this), context)).documentId !== previous) return;
-      await Bun.sleep(25);
+      await sleep(25);
     }
     throw new Error('Timed out waiting for document to change');
   }
@@ -373,7 +374,7 @@ export class ZenBrowser {
       const deadline = Date.now() + timeoutMs;
       while (Date.now() < deadline) {
         if (navigationStarted) return { type: 'navigation' };
-        await Bun.sleep(Math.max(0, Math.min(100, deadline - Date.now())));
+        await sleep(Math.max(0, Math.min(100, deadline - Date.now())));
         if (navigationStarted) return { type: 'navigation' };
         let current;
         try {
@@ -751,7 +752,7 @@ export class ZenBrowser {
     do {
       observed = await this.#withElement(context, selector, 'element => element.checked');
       if (observed === checked) return;
-      await Bun.sleep(50);
+      await sleep(50);
     } while (Date.now() < deadline);
     throw new InputVerificationError(`The control was clicked, but ${JSON.stringify(selector)} still reads checked=${JSON.stringify(observed)} after ${CHECK_SETTLE_MS} ms`);
   }

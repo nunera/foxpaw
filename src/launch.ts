@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, openSync, readFileSync, readdirSync, readlinkSyn
 import { createConnection } from 'node:net';
 import { homedir } from 'node:os';
 import { delimiter, dirname, join } from 'node:path';
+import { setTimeout as sleep } from 'node:timers/promises';
 import autoconfigPrefs from '../autoconfig/defaults/pref/foxpaw-autoconfig.js' with { type: 'text' };
 import autoconfigCfg from '../autoconfig/foxpaw.cfg' with { type: 'text' };
 import { firefoxBidiUrl, type Environment } from './config.ts';
@@ -184,7 +185,7 @@ export async function launchBrowser(options: LaunchOptions = {}): Promise<Launch
   while (Date.now() < deadline) {
     if (await isListening(port)) return { url, started: true, browser, profile, mode, pid: child.pid, log };
     if (exit !== undefined) throw new Error(`${browser} stopped before remote control started (${exit}); see ${log}`);
-    await Bun.sleep(200);
+    await sleep(200);
   }
   if (mode === 'dynamic') {
     child.kill();

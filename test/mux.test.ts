@@ -32,7 +32,7 @@ function fakeFirefox() {
 type Raw = { socket: WebSocket; events: JsonObject[]; send(method: string, params?: JsonObject): Promise<JsonObject>; closed: Promise<void> };
 
 async function rawClient(port: number): Promise<Raw> {
-  const socket = new WebSocket(`ws://127.0.0.1:${port}/session`);
+  const socket = new WebSocket(`ws://127.0.0.1:${port}/session?token=${TOKEN}`);
   const events: JsonObject[] = [];
   const waiting = new Map<number, (message: JsonObject) => void>();
   let id = 0;
@@ -62,18 +62,19 @@ const until = async (predicate: () => boolean) => { for (let i = 0; i < 200 && !
 const brokers: Array<{ shutdown(): Promise<void> }> = [];
 afterEach(async () => { for (const broker of brokers.splice(0)) await broker.shutdown(); });
 
-function start() {
+const TOKEN = 'test-token';
+async function start() {
   const firefox = fakeFirefox();
-  const broker = createBroker(firefox.upstream, 0);
+  const broker = await createBroker(firefox.upstream, 0, { token: TOKEN });
   brokers.push(broker);
-  return { ...firefox, port: broker.server.port as number };
+  return { ...firefox, port: broker.port };
 }
 
 const blocked = (request: string, intercept: string, context: string) =>
   ({ isBlocked: true, intercepts: [intercept], context, request: { request, url: 'https://example.com/submit?token=x', method: 'POST' } });
 
 test('each raw connection gets its own session, and a fresh connection sees none (a released session)', async () => {
-  const { port, calls } = start();
+  const { port, calls } = await start();
   const a = await rawClient(port), b = await rawClient(port);
   const first = await a.send('session.new', { capabilities: {} });
   const second = await b.send('session.new', { capabilities: {} });
@@ -88,7 +89,7 @@ test('each raw connection gets its own session, and a fresh connection sees none
 });
 
 test('a held request goes only to the client whose intercept holds it, with its real URL', async () => {
-  const { port, emit } = start();
+  const { port, emit } = await start();
   const a = await rawClient(port), b = await rawClient(port);
   await a.send('session.new'); await b.send('session.new');
   await a.send('session.subscribe', { events: ['network.beforeRequestSent'], contexts: ['tabA'] });
@@ -104,7 +105,7 @@ test('a held request goes only to the client whose intercept holds it, with its 
 });
 
 test('a client that disconnects without ending leaves nothing behind, and nothing let through', async () => {
-  const { port, emit, calls } = start();
+  const { port, emit, calls } = await start();
   const a = await rawClient(port);
   await a.send('session.new');
   await a.send('session.subscribe', { events: ['network.beforeRequestSent'], contexts: ['tabA'] });
@@ -127,7 +128,7 @@ test('a client that disconnects without ending leaves nothing behind, and nothin
 });
 
 test('events reach a client through its own subscriptions, frames counted as their tab', async () => {
-  const { port, emit } = start();
+  const { port, emit } = await start();
   const a = await rawClient(port), b = await rawClient(port);
   await a.send('session.new'); await b.send('session.new');
   await a.send('session.subscribe', { events: ['browsingContext.load', 'log.entryAdded'], contexts: ['tabA'] });
@@ -144,7 +145,7 @@ test('events reach a client through its own subscriptions, frames counted as the
 });
 
 test('losing Firefox disconnects every raw client', async () => {
-  const { port, lose } = start();
+  const { port, lose } = await start();
   const a = await rawClient(port);
   await a.send('session.new');
   lose();
