@@ -141,10 +141,12 @@ export const stricter = (a: Ruling, b: Ruling): Ruling => SEVERITY[b.decision] >
 
 // Word-boundary, case-insensitive: "Pay" and "Place order" match; "Payment" and "Checkbox" don't.
 export const RISKY_WORDS = /\b(pay|purchase|buy|order|checkout|delete|remove|send|submit|confirm|transfer|publish|post|sign|unsubscribe)\b/i;
+// The words that keep their weight even on a sign-in form ("Sign in", "Submit", "Confirm" are how people log in).
+const SIGN_IN_RISKY_WORDS = /\b(pay|purchase|buy|order|checkout|delete|remove|send|transfer|publish|unsubscribe)\b/i;
 const READ_ACTIONS: Record<string, true> = { tabs: true, inspect: true, form_schema: true, field_state: true, query: true, table: true, events: true, wait_event: true, wait_for: true, wait_for_change: true, wait_url: true, assert: true, assert_many: true, screenshot: true, hover: true, scroll: true, activate: true };
-const IRREVERSIBLE_ACTIONS: Record<string, true> = { submit_form: true, evaluate: true };
+const IRREVERSIBLE_ACTIONS: Record<string, true> = { evaluate: true };
 // The class depends on the element, the key, or the open dialog.
-const ELEMENT_ACTIONS: Record<string, true> = { click: true, double_click: true, press: true, type: true, pointer: true, batch: true, dialog: true };
+const ELEMENT_ACTIONS: Record<string, true> = { click: true, double_click: true, press: true, type: true, pointer: true, batch: true, dialog: true, submit_form: true };
 
 /** Every class an action could end up in; actions not listed (including other features' actions) are writes. */
 export function possibleClasses(action: string): ActionClass[] {
@@ -155,11 +157,25 @@ export function possibleClasses(action: string): ActionClass[] {
 }
 
 export type Classification = { actionClass: ActionClass; why: string };
+
+/**
+ * Signing in: a form with exactly one password field (sign-up and password-change forms have two or more). Logging in
+ * is a write, not irreversible, or every login would ask and people would turn the prompts off. Buttons that still
+ * say pay, delete, send, and so on keep their weight.
+ */
+function signIn(facts: TargetDescription): Classification | undefined {
+  if (facts.form?.passwordFields !== 1) return undefined;
+  for (const label of [facts.name, facts.text]) if (label && SIGN_IN_RISKY_WORDS.test(label)) return undefined;
+  return { actionClass: 'write', why: 'signing in (a form with one password field)' };
+}
+
 /** Classifies a click or an Enter key on an element from its facts (runtime.describe()). */
 export function classifyElement(facts: TargetDescription | undefined, trigger: 'click' | 'enter'): Classification {
   if (!facts) return trigger === 'enter'
     ? { actionClass: 'irreversible', why: 'Enter without a target goes to the focused element, which may submit a form' }
     : { actionClass: 'write', why: 'no element' };
+  const login = signIn(facts);
+  if (login) return login;
   const type = facts.type?.toLowerCase();
   if ((facts.tag === 'input' && (type === 'submit' || type === 'image')) || (facts.tag === 'button' && facts.form && (type === undefined || type === 'submit'))) {
     return { actionClass: 'irreversible', why: 'submit control' };
@@ -228,6 +244,12 @@ export async function classifyCall(call: ActionCall, runtime: ToolRuntime): Prom
     return classified({ actionClass: static_[0]!, why: static_[0] === 'irreversible' ? `${action} is always irreversible` : action });
   }
   if (action === 'click' || action === 'double_click') return classified(await element(params, 'click'));
+  // Submitting a form is irreversible, except signing in.
+  if (action === 'submit_form') {
+    await locate(params);
+    const facts = named(params) ? await runtime.describe(context, tabId, params) : undefined;
+    return classified({ ...(facts && signIn(facts)) || { actionClass: 'irreversible', why: 'submit_form' }, ...(facts ? { target: facts } : {}) });
+  }
   if (action === 'pointer') {
     if (params.pointer === 'up') return classified(await element(params, 'click'));
     await locate(params);

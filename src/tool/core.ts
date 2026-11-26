@@ -32,8 +32,11 @@ export type ToolContent = { type: 'text'; text: string } | { type: 'image'; data
 export type ActionCall = { action: string; params: ToolParams };
 export type ActionResult = { details: Record<string, unknown>; image?: string };
 export type ElementRecord = { tabId: string; locator: Locator; frame: FrameRef; identity: ElementIdentity; nodeId: string };
-/** What an element-targeting action is about to act on, for policy decisions and audit records. */
-export type TargetDescription = { tabId: string; url: string; selector: string; tag: string; type?: string; role: string | null; name: string | null; text: string; form?: { action: string; method: string } };
+/**
+ * What an element-targeting action is about to act on, for policy decisions and audit records. `form.passwordFields`
+ * counts password inputs in the element's form: one is a sign-in; two or more a sign-up or a password change.
+ */
+export type TargetDescription = { tabId: string; url: string; selector: string; tag: string; type?: string; role: string | null; name: string | null; text: string; form?: { action: string; method: string; passwordFields?: number } };
 
 /** Shared state and helpers features use; the same objects the core actions use. */
 export type ToolRuntime = {
@@ -809,9 +812,9 @@ export function createBrowserTool(z: typeof Zod, options: BrowserToolOptions = {
         type: element.getAttribute('type') ?? undefined,
         // Never a field's value (it may be a password or a filled secret); a button-like input's value is its label.
         text: (element.innerText || (/^(submit|button|reset)$/i.test(element.getAttribute('type') ?? '') ? element.value : '') || element.getAttribute('aria-label') || '').trim().slice(0, 120),
-        form: form ? { action: form.action || location.href, method: (form.method || 'get').toLowerCase() } : undefined,
+        form: form ? { action: form.action || location.href, method: (form.method || 'get').toLowerCase(), passwordFields: form.querySelectorAll('input[type=password]').length } : undefined,
       };
-    })()`) as { tag: string; type?: string; text: string; form?: { action: string; method: string } } | null;
+    })()`) as { tag: string; type?: string; text: string; form?: { action: string; method: string; passwordFields: number } } | null;
     if (!facts) return undefined;
     return { tabId: currentTabId, url: context.url, selector: resolved.selector, role: resolved.identity.role, name: resolved.identity.name, ...facts };
   };
