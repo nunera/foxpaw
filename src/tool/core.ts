@@ -762,7 +762,8 @@ export function createBrowserTool(z: typeof Zod, options: BrowserToolOptions = {
       return {
         tag: element.tagName.toLowerCase(),
         type: element.getAttribute('type') ?? undefined,
-        text: (element.innerText || element.value || element.getAttribute('aria-label') || '').trim().slice(0, 120),
+        // Never a field's value (it may be a password or a filled secret); a button-like input's value is its label.
+        text: (element.innerText || (/^(submit|button|reset)$/i.test(element.getAttribute('type') ?? '') ? element.value : '') || element.getAttribute('aria-label') || '').trim().slice(0, 120),
         form: form ? { action: form.action || location.href, method: (form.method || 'get').toLowerCase() } : undefined,
       };
     })()`) as { tag: string; type?: string; text: string; form?: { action: string; method: string } } | null;
