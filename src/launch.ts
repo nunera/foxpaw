@@ -1,11 +1,9 @@
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, openSync, readFileSync, readdirSync, readlinkSync, realpathSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, openSync, readlinkSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { createConnection } from 'node:net';
 import { homedir } from 'node:os';
 import { delimiter, dirname, join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
-import autoconfigPrefs from '../autoconfig/defaults/pref/foxpaw-autoconfig.js' with { type: 'text' };
-import autoconfigCfg from '../autoconfig/foxpaw.cfg' with { type: 'text' };
 import { firefoxBidiUrl, type Environment } from './config.ts';
 
 /** Remote control started from inside the browser (no --remote-debugging-port) always listens here. */
@@ -194,9 +192,6 @@ export async function launchBrowser(options: LaunchOptions = {}): Promise<Launch
   throw new Error(`${browser} did not open remote control on ${port} within ${Math.round((options.timeoutMs ?? 30_000) / 1000)}s; see ${log}`);
 }
 
-/** The AutoConfig, embedded so a compiled foxpaw binary carries it too. */
-export const AUTOCONFIG = { prefs: autoconfigPrefs, cfg: autoconfigCfg } as const;
-
 /**
  * The directory AutoConfig is read from: the one holding `omni.ja`, next to the real browser binary (symlinks resolved).
  * Returns undefined when the executable is a wrapper script (Nix, Flatpak); install the files with the package then.
@@ -206,19 +201,4 @@ export function browserAppDir(browser: string): string | undefined {
   try { real = realpathSync(browser); } catch { return undefined; }
   const candidates = [dirname(real), join(dirname(real), '..', 'Resources')];     // Linux/Windows; macOS bundles
   return candidates.find((dir) => existsSync(join(dir, 'omni.ja')));
-}
-
-/** Write the foxpaw AutoConfig into a browser's install directory. Refuses one that already uses another AutoConfig file. */
-export function installAutoconfig(appDir: string): string[] {
-  const prefsDir = join(appDir, 'defaults', 'pref');
-  for (const file of existsSync(prefsDir) ? readdirSync(prefsDir) : []) {
-    if (file === 'foxpaw-autoconfig.js' || !file.endsWith('.js')) continue;
-    const text = readFileSync(join(prefsDir, file), 'utf8');
-    if (text.includes('general.config.filename')) throw new Error(`${join(prefsDir, file)} already names an AutoConfig file, and a browser reads only one. Append the output of \`foxpaw autoconfig print\` (without its first line) to the file it names instead.`);
-  }
-  mkdirSync(prefsDir, { recursive: true });
-  const written = [join(prefsDir, 'foxpaw-autoconfig.js'), join(appDir, 'foxpaw.cfg')];
-  writeFileSync(written[0]!, AUTOCONFIG.prefs);
-  writeFileSync(written[1]!, AUTOCONFIG.cfg);
-  return written;
 }

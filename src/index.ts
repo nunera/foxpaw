@@ -5,4 +5,5 @@ export { BrokerBidiClient, ensureBroker } from './broker-client.ts';
 export { createBroker, runBroker, type BrokerOptions } from './broker.ts';
 export { ZenBrowser } from './browser.ts';
 export { brokerSessionUrl, firefoxBidiBrokerUrl, firefoxBidiUrl } from './config.ts';
-export { defaultProfileDir, findBrowser, installAutoconfig, launchBrowser, ProfileInUseError, type LaunchMode, type LaunchOptions, type LaunchResult } from './launch.ts';
+export { installAutoconfig } from './autoconfig.ts';
+export { defaultProfileDir, findBrowser, launchBrowser, ProfileInUseError, type LaunchMode, type LaunchOptions, type LaunchResult } from './launch.ts';

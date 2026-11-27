@@ -2,7 +2,8 @@ import { afterEach, expect, test } from 'bun:test';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { findBrowser, installAutoconfig, launchBrowser, profileLockOwner, ProfileInUseError } from '../src/launch.ts';
+import { installAutoconfig } from '../src/autoconfig.ts';
+import { findBrowser, launchBrowser, profileLockOwner, ProfileInUseError } from '../src/launch.ts';
 
 const started: number[] = [];
 afterEach(() => { for (const pid of started.splice(0)) { try { process.kill(pid); } catch { /* already gone */ } } });
