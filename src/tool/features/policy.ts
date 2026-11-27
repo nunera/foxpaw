@@ -22,7 +22,7 @@ export function policyFeature(options: PolicyFeatureOptions = {}): ToolFeature {
   return {
     name: 'policy',
     description: [
-      'Policy: the user decides per site which actions run, need their approval, or are refused. Irreversible actions (submit_form, evaluate, `commit`, clicking or pressing Enter on submit/pay/delete/send/… controls or inside POST forms) ask the user by default and block until they answer. A refusal has `actionPerformed: false` and `policy: {decision, reason}`: nothing ran; do not retry or work around it.',
+      'Policy: the user decides per site which actions run, need their approval, or are refused. Irreversible actions (submit_form, `commit`, clicking or pressing Enter on submit/pay/delete/send/… controls or inside POST forms) ask the user by default and block until they answer. A refusal has `actionPerformed: false` and `policy: {decision, reason}`: nothing ran; do not retry or work around it.',
     ],
     async before(call, runtime) {
       const loaded = loadPolicy(options.env);

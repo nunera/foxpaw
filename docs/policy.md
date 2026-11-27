@@ -5,10 +5,12 @@ foxpaw sorts every `zen_browser` call into one of three classes and decides per 
 | class | actions |
 |---|---|
 | read | `tabs`, `inspect`, `query`, `table`, `form_schema`, `field_state`, `screenshot`, `events`, waits, `assert`, `hover`, `scroll`, `activate` |
-| write | `navigate`, `open`, `reload`, `history`, `close`, `fill`, `type`, `select`, `check`, `upload`, `drag`, `fill_secret`, clicks on ordinary elements, signing in (see below), and actions added by other features |
-| irreversible | `submit_form`, `evaluate` (page script can do anything), batch `commit` steps, and `click`, `double_click`, `pointer` up, or `press` Enter (also `type` text with a newline) on a submit control, on an element whose accessible name or text contains one of the words pay, purchase, buy, order, checkout, delete, remove, send, submit, confirm, transfer, publish, post, sign, unsubscribe (whole words, any case), or on any element inside a `<form method="post">`. Accepting a dialog whose message contains one of those words is irreversible too. |
+| write | `navigate`, `open`, `reload`, `history`, `close`, `fill`, `type`, `select`, `check`, `upload`, `drag`, `fill_secret`, `evaluate`, clicks on ordinary elements, signing in (see below), and actions added by other features |
+| irreversible | `submit_form`, batch `commit` steps, and `click`, `double_click`, `pointer` up, or `press` Enter (also `type` text with a newline) on a submit control, on an element whose accessible name or text contains one of the words pay, purchase, buy, order, checkout, delete, remove, send, submit, confirm, transfer, publish, post, sign, unsubscribe (whole words, any case), or on any element inside a `<form method="post">`. Accepting a dialog whose message contains one of those words is irreversible too. |
 
 `press` Enter with no target goes to whatever has focus, so it counts as irreversible. A `batch` takes the class of its most severe step.
+
+`evaluate` runs page script, which can do anything a click can. It still counts as a write because agents call it all the time to read pages, and a prompt on every call teaches you to click Approve without reading. To have it ask on a site, give the site `write: "ask"`. On a page where a secret was filled, `evaluate` is refused outright ([secrets.md](secrets.md)).
 
 Signing in is a write. A click, Enter, or `submit_form` in a form with exactly one password field counts as logging in, even when the button says "Sign in", "Submit", or "Confirm", so logins don't ask every time. Sign-up and password-change forms (two or more password fields) stay irreversible, and so does a button on a sign-in form that says pay, purchase, buy, order, checkout, delete, remove, send, transfer, publish, or unsubscribe. A page could dress a payment form up as a login; if that matters on a site, give it a rule that asks for writes.
 

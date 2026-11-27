@@ -144,14 +144,15 @@ export const RISKY_WORDS = /\b(pay|purchase|buy|order|checkout|delete|remove|sen
 // The words that keep their weight even on a sign-in form ("Sign in", "Submit", "Confirm" are how people log in).
 const SIGN_IN_RISKY_WORDS = /\b(pay|purchase|buy|order|checkout|delete|remove|send|transfer|publish|unsubscribe)\b/i;
 const READ_ACTIONS: Record<string, true> = { tabs: true, inspect: true, form_schema: true, field_state: true, query: true, table: true, events: true, wait_event: true, wait_for: true, wait_for_change: true, wait_url: true, assert: true, assert_many: true, screenshot: true, hover: true, scroll: true, activate: true };
-const IRREVERSIBLE_ACTIONS: Record<string, true> = { evaluate: true };
+// `evaluate` is a write like `fill`, not irreversible: agents use it constantly to read pages, and asking on every
+// call trains people to click Approve blindly. Sites that need more care set `write: "ask"`. Pages with a filled
+// secret refuse it outright (secrets.md).
 // The class depends on the element, the key, or the open dialog.
 const ELEMENT_ACTIONS: Record<string, true> = { click: true, double_click: true, press: true, type: true, pointer: true, batch: true, dialog: true, submit_form: true };
 
 /** Every class an action could end up in; actions not listed (including other features' actions) are writes. */
 export function possibleClasses(action: string): ActionClass[] {
   if (READ_ACTIONS[action]) return ['read'];
-  if (IRREVERSIBLE_ACTIONS[action]) return ['irreversible'];
   if (ELEMENT_ACTIONS[action]) return ['write', 'irreversible'];
   return ['write'];
 }

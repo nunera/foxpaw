@@ -102,7 +102,7 @@ If a package manager owns the browser (Nix, Flatpak, a distro package), that dir
 
 Everything here is on by default except where it says otherwise, and it applies the same way in every host, because it lives in the tool rather than in a host's settings. One JSON file, `~/.config/foxpaw/config.json`, configures all of it.
 
-**Per-site policy.** Every call is a read, a write, or irreversible: submitting a form, paying, deleting, sending, `evaluate`, or clicking a button whose label says so. Signing in is a write, so logins don't ask every time. Each site gets `allow`, `ask`, or `deny` per class. With no config, irreversible actions ask. Asking means a desktop prompt with Approve and Deny (a notification on Linux, a dialog on macOS and Windows); no answer within two minutes is a no.
+**Per-site policy.** Every call is a read, a write, or irreversible: submitting a form, paying, deleting, sending, or clicking a button whose label says so. Signing in and `evaluate` are writes, so logins and page scripts don't ask every time. Each site gets `allow`, `ask`, or `deny` per class. With no config, irreversible actions ask. Asking means a desktop prompt with Approve and Deny (a notification on Linux, a dialog on macOS and Windows); no answer within two minutes is a no.
 
 ```json
 {

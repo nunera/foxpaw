@@ -125,7 +125,7 @@ test('classifies calls against the live page per action', async () => {
   const { runtime, described } = fakeRuntime({ facts: pay });
   expect((await classifyCall(call({ action: 'inspect', tabId: 'tab_1' }), runtime)).actionClass).toBe('read');
   expect((await classifyCall(call({ action: 'fill', tabId: 'tab_1', selector: '#a', value: 'x' }), runtime)).actionClass).toBe('write');
-  expect((await classifyCall(call({ action: 'evaluate', tabId: 'tab_1', expression: '1' }), runtime)).actionClass).toBe('irreversible');
+  expect((await classifyCall(call({ action: 'evaluate', tabId: 'tab_1', expression: '1' }), runtime)).actionClass).toBe('write');
   expect((await classifyCall(call({ action: 'submit_form', tabId: 'tab_1', selector: 'form' }), runtime)).actionClass).toBe('irreversible');
   const click = await classifyCall(call({ action: 'click', tabId: 'tab_1', selector: '#pay' }), runtime);
   expect(click).toMatchObject({ actionClass: 'irreversible', urls: ['https://shop.example/cart'], tabId: 'tab_1', target: pay });
@@ -161,7 +161,7 @@ test('ask blocks on the approver; approval lets the action through, denial refus
 
 test('an approver that never answers is a denial after the timeout, even if it later says yes', async () => {
   const env = configFile({ policy: { approval: { timeoutMs: 50 } } });
-  const refusal = await refusalOf(policyFeature({ env, approval: { approvers: [fakeApprover('hang')] } }).before!(call({ action: 'evaluate', tabId: 'tab_1', expression: '1' }), fakeRuntime().runtime));
+  const refusal = await refusalOf(policyFeature({ env, approval: { approvers: [fakeApprover('hang')] } }).before!(call({ action: 'submit_form', tabId: 'tab_1', selector: 'form' }), fakeRuntime().runtime));
   expect(refusal.policy.reason).toContain('no answer within');
 });
 
